@@ -630,18 +630,22 @@ impl<T: Copy> Drop for ResetCell<'_, T> {
     }
 }
 
-// A private inner module for managing the TLS state that we require across
-// calls in wasm. The WebAssembly code is called from C++ and then a trap may
-// happen which requires us to read some contextual state to figure out what to
-// do with the trap. This `tls` module is used to persist that information from
-// the caller to the trap site.
-mod tls {
+/// A private inner module for managing the TLS state that we require across
+/// calls in wasm. The WebAssembly code is called from C++ and then a trap may
+/// happen which requires us to read some contextual state to figure out what to
+/// do with the trap. This `tls` module is used to persist that information from
+/// the caller to the trap site.
+pub mod tls {
     use super::CallThreadState;
     use std::cell::Cell;
     use std::mem;
     use std::ptr;
 
-    thread_local!(static PTR: Cell<*const CallThreadState<'static>> = Cell::new(ptr::null()));
+
+    thread_local!(
+        /// This is set to pub so it can be preserved during a context swith on the same thread by AsyncWomrhole.
+        pub static PTR: Cell<*const CallThreadState<'static>> = Cell::new(ptr::null())
+    );
 
     /// Configures thread local state such that for the duration of the
     /// execution of `closure` any call to `with` will yield `ptr`, unless this

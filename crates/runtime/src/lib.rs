@@ -30,7 +30,7 @@ mod memory;
 mod mmap;
 mod sig_registry;
 mod table;
-mod traphandlers;
+pub mod traphandlers;
 mod vmcontext;
 
 pub mod debug_builtins;
