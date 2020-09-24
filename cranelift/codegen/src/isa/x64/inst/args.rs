@@ -336,6 +336,7 @@ impl fmt::Display for UnaryRmROpcode {
 pub(crate) enum InstructionSet {
     SSE,
     SSE2,
+    SSSE3,
     SSE41,
 }
 
@@ -393,10 +394,27 @@ pub enum SseOpcode {
     Mulsd,
     Orps,
     Orpd,
+    Pabsb,
+    Pabsw,
+    Pabsd,
     Paddb,
     Paddd,
     Paddq,
     Paddw,
+    Pavgb,
+    Pavgw,
+    Pmaxsb,
+    Pmaxsw,
+    Pmaxsd,
+    Pmaxub,
+    Pmaxuw,
+    Pmaxud,
+    Pminsb,
+    Pminsw,
+    Pminsd,
+    Pminub,
+    Pminuw,
+    Pminud,
     Pmulld,
     Pmullw,
     Pmuludq,
@@ -412,6 +430,7 @@ pub enum SseOpcode {
     Psubd,
     Psubq,
     Psubw,
+    Pxor,
     Rcpss,
     Roundss,
     Roundsd,
@@ -498,6 +517,12 @@ impl SseOpcode {
             | SseOpcode::Paddd
             | SseOpcode::Paddq
             | SseOpcode::Paddw
+            | SseOpcode::Pavgb
+            | SseOpcode::Pavgw
+            | SseOpcode::Pmaxsw
+            | SseOpcode::Pmaxub
+            | SseOpcode::Pminsw
+            | SseOpcode::Pminub
             | SseOpcode::Pmullw
             | SseOpcode::Pmuludq
             | SseOpcode::Psllw
@@ -512,6 +537,7 @@ impl SseOpcode {
             | SseOpcode::Psubd
             | SseOpcode::Psubq
             | SseOpcode::Psubw
+            | SseOpcode::Pxor
             | SseOpcode::Sqrtpd
             | SseOpcode::Sqrtsd
             | SseOpcode::Subpd
@@ -519,9 +545,20 @@ impl SseOpcode {
             | SseOpcode::Ucomisd
             | SseOpcode::Xorpd => SSE2,
 
-            SseOpcode::Insertps | SseOpcode::Pmulld | SseOpcode::Roundss | SseOpcode::Roundsd => {
-                SSE41
-            }
+            SseOpcode::Pabsb | SseOpcode::Pabsw | SseOpcode::Pabsd => SSSE3,
+
+            SseOpcode::Insertps
+            | SseOpcode::Pmaxsb
+            | SseOpcode::Pmaxsd
+            | SseOpcode::Pmaxuw
+            | SseOpcode::Pmaxud
+            | SseOpcode::Pminsb
+            | SseOpcode::Pminsd
+            | SseOpcode::Pminuw
+            | SseOpcode::Pminud
+            | SseOpcode::Pmulld
+            | SseOpcode::Roundss
+            | SseOpcode::Roundsd => SSE41,
         }
     }
 
@@ -588,10 +625,27 @@ impl fmt::Debug for SseOpcode {
             SseOpcode::Mulsd => "mulsd",
             SseOpcode::Orpd => "orpd",
             SseOpcode::Orps => "orps",
+            SseOpcode::Pabsb => "pabsb",
+            SseOpcode::Pabsw => "pabsw",
+            SseOpcode::Pabsd => "pabsd",
             SseOpcode::Paddb => "paddb",
             SseOpcode::Paddd => "paddd",
             SseOpcode::Paddq => "paddq",
             SseOpcode::Paddw => "paddw",
+            SseOpcode::Pavgb => "pavgb",
+            SseOpcode::Pavgw => "pavgw",
+            SseOpcode::Pmaxsb => "pmaxsb",
+            SseOpcode::Pmaxsw => "pmaxsw",
+            SseOpcode::Pmaxsd => "pmaxsd",
+            SseOpcode::Pmaxub => "pmaxub",
+            SseOpcode::Pmaxuw => "pmaxuw",
+            SseOpcode::Pmaxud => "pmaxud",
+            SseOpcode::Pminsb => "pminsb",
+            SseOpcode::Pminsw => "pminsw",
+            SseOpcode::Pminsd => "pminsd",
+            SseOpcode::Pminub => "pminub",
+            SseOpcode::Pminuw => "pminuw",
+            SseOpcode::Pminud => "pminud",
             SseOpcode::Pmulld => "pmulld",
             SseOpcode::Pmullw => "pmullw",
             SseOpcode::Pmuludq => "pmuludq",
@@ -607,6 +661,7 @@ impl fmt::Debug for SseOpcode {
             SseOpcode::Psubd => "psubd",
             SseOpcode::Psubq => "psubq",
             SseOpcode::Psubw => "psubw",
+            SseOpcode::Pxor => "pxor",
             SseOpcode::Rcpss => "rcpss",
             SseOpcode::Roundss => "roundss",
             SseOpcode::Roundsd => "roundsd",
@@ -998,6 +1053,14 @@ pub enum OperandSize {
 }
 
 impl OperandSize {
+    pub(crate) fn from_bytes(num_bytes: u32) -> Self {
+        match num_bytes {
+            1 | 2 | 4 => OperandSize::Size32,
+            8 => OperandSize::Size64,
+            _ => unreachable!(),
+        }
+    }
+
     pub(crate) fn to_bytes(&self) -> u8 {
         match self {
             Self::Size32 => 4,

@@ -1,7 +1,8 @@
-use crate::handle::{Handle, HandleRights};
+use crate::handle::{Fdflags, Filestat, Fstflags, Handle, HandleRights, Oflags, Rights};
+use crate::sched::Timestamp;
 use crate::sys::osdir::OsDir;
 use crate::sys::{fd, AsFile};
-use crate::wasi::{types, Errno, Result};
+use crate::{Error, Result};
 use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Metadata, OpenOptions};
@@ -35,7 +36,7 @@ fn concatenate<P: AsRef<Path>>(file: &OsDir, path: P) -> Result<PathBuf> {
     // WASI is not able to deal with absolute paths
     // so error out if absolute
     if path.as_ref().is_absolute() {
-        return Err(Errno::Notcapable);
+        return Err(Error::Notcapable);
     }
 
     let dir_path = get_file_path(&*file.as_file()?)?;
@@ -46,12 +47,12 @@ fn concatenate<P: AsRef<Path>>(file: &OsDir, path: P) -> Result<PathBuf> {
     // components with `out_path`
     let out_path = PathBuf::from(strip_extended_prefix(out_path));
 
-    log::debug!("out_path={:?}", out_path);
+    tracing::debug!(out_path = tracing::field::debug(&out_path));
 
     Ok(out_path)
 }
 
-fn file_access_mode_from_fdflags(fdflags: types::Fdflags, read: bool, write: bool) -> AccessMode {
+fn file_access_mode_from_fdflags(fdflags: Fdflags, read: bool, write: bool) -> AccessMode {
     let mut access_mode = AccessMode::READ_CONTROL;
 
     // We always need `FILE_WRITE_ATTRIBUTES` so that we can set attributes such as filetimes, etc.
@@ -71,7 +72,7 @@ fn file_access_mode_from_fdflags(fdflags: types::Fdflags, read: bool, write: boo
     // For append, grant the handle FILE_APPEND_DATA access but *not* FILE_WRITE_DATA.
     // This makes the handle "append only".
     // Changes to the file pointer will be ignored (like POSIX's O_APPEND behavior).
-    if fdflags.contains(&types::Fdflags::APPEND) {
+    if fdflags.contains(&Fdflags::APPEND) {
         access_mode.insert(AccessMode::FILE_APPEND_DATA);
         access_mode.remove(AccessMode::FILE_WRITE_DATA);
     }
@@ -91,27 +92,27 @@ pub(crate) fn from_host<S: AsRef<OsStr>>(s: S) -> Result<String> {
 
 pub(crate) fn open_rights(
     input_rights: &HandleRights,
-    oflags: types::Oflags,
-    fdflags: types::Fdflags,
+    oflags: Oflags,
+    fdflags: Fdflags,
 ) -> HandleRights {
     // which rights are needed on the dirfd?
-    let mut needed_base = types::Rights::PATH_OPEN;
+    let mut needed_base = Rights::PATH_OPEN;
     let mut needed_inheriting = input_rights.base | input_rights.inheriting;
 
     // convert open flags
-    if oflags.contains(&types::Oflags::CREAT) {
-        needed_base |= types::Rights::PATH_CREATE_FILE;
-    } else if oflags.contains(&types::Oflags::TRUNC) {
-        needed_base |= types::Rights::PATH_FILESTAT_SET_SIZE;
+    if oflags.contains(&Oflags::CREAT) {
+        needed_base |= Rights::PATH_CREATE_FILE;
+    } else if oflags.contains(&Oflags::TRUNC) {
+        needed_base |= Rights::PATH_FILESTAT_SET_SIZE;
     }
 
     // convert file descriptor flags
-    if fdflags.contains(&types::Fdflags::DSYNC)
-        || fdflags.contains(&types::Fdflags::RSYNC)
-        || fdflags.contains(&types::Fdflags::SYNC)
+    if fdflags.contains(&Fdflags::DSYNC)
+        || fdflags.contains(&Fdflags::RSYNC)
+        || fdflags.contains(&Fdflags::SYNC)
     {
-        needed_inheriting |= types::Rights::FD_DATASYNC;
-        needed_inheriting |= types::Rights::FD_SYNC;
+        needed_inheriting |= Rights::FD_DATASYNC;
+        needed_inheriting |= Rights::FD_SYNC;
     }
 
     HandleRights::new(needed_base, needed_inheriting)
@@ -131,20 +132,20 @@ pub(crate) fn readlinkat(dirfd: &OsDir, s_path: &str) -> Result<String> {
             let dir_path = PathBuf::from(strip_extended_prefix(dir_path));
             let target_path = target_path
                 .strip_prefix(dir_path)
-                .map_err(|_| Errno::Notcapable)?;
-            let target_path = target_path.to_str().ok_or(Errno::Ilseq)?;
+                .map_err(|_| Error::Notcapable)?;
+            let target_path = target_path.to_str().ok_or(Error::Ilseq)?;
             return Ok(target_path.to_owned());
         }
         Err(e) => e,
     };
     if let Some(code) = err.raw_os_error() {
-        log::debug!("readlinkat error={:?}", code);
+        tracing::debug!("readlinkat error={:?}", code);
         if code as u32 == winerror::ERROR_INVALID_NAME {
             if s_path.ends_with('/') {
                 // strip "/" and check if exists
                 let path = concatenate(dirfd, Path::new(s_path.trim_end_matches('/')))?;
                 if path.exists() && !path.is_dir() {
-                    return Err(Errno::Notdir);
+                    return Err(Error::Notdir);
                 }
             }
         }
@@ -170,12 +171,15 @@ pub(crate) fn link(
     let new_path = concatenate(new_dirfd, new_path)?;
     if follow_symlinks {
         // in particular, this will return an error if the target path doesn't exist
-        log::debug!("Following symlinks for path: {:?}", old_path);
+        tracing::debug!(
+            old_path = tracing::field::display(old_path.display()),
+            "Following symlinks"
+        );
         old_path = fs::canonicalize(&old_path).map_err(|e| match e.raw_os_error() {
             // fs::canonicalize under Windows will return:
             // * ERROR_FILE_NOT_FOUND, if it encounters a dangling symlink
             // * ERROR_CANT_RESOLVE_FILENAME, if it encounters a symlink loop
-            Some(code) if code as u32 == winerror::ERROR_CANT_RESOLVE_FILENAME => Errno::Loop,
+            Some(code) if code as u32 == winerror::ERROR_CANT_RESOLVE_FILENAME => Error::Loop,
             _ => e.into(),
         })?;
     }
@@ -184,13 +188,13 @@ pub(crate) fn link(
         Err(e) => e,
     };
     if let Some(code) = err.raw_os_error() {
-        log::debug!("path_link at fs::hard_link error code={:?}", code);
+        tracing::debug!("path_link at fs::hard_link error code={:?}", code);
         if code as u32 == winerror::ERROR_ACCESS_DENIED {
             // If an attempt is made to create a hard link to a directory, POSIX-compliant
             // implementations of link return `EPERM`, but `ERROR_ACCESS_DENIED` is converted
             // to `EACCES`. We detect and correct this case here.
             if fs::metadata(&old_path).map(|m| m.is_dir()).unwrap_or(false) {
-                return Err(Errno::Perm);
+                return Err(Error::Perm);
             }
         }
     }
@@ -202,19 +206,19 @@ pub(crate) fn open(
     path: &str,
     read: bool,
     write: bool,
-    oflags: types::Oflags,
-    fdflags: types::Fdflags,
+    oflags: Oflags,
+    fdflags: Fdflags,
 ) -> Result<Box<dyn Handle>> {
     use winx::file::{AccessMode, CreationDisposition, Flags};
 
-    let is_trunc = oflags.contains(&types::Oflags::TRUNC);
+    let is_trunc = oflags.contains(&Oflags::TRUNC);
 
     if is_trunc {
         // Windows does not support append mode when opening for truncation
         // This is because truncation requires `GENERIC_WRITE` access, which will override the removal
         // of the `FILE_WRITE_DATA` permission.
-        if fdflags.contains(&types::Fdflags::APPEND) {
-            return Err(Errno::Notsup);
+        if fdflags.contains(&Fdflags::APPEND) {
+            return Err(Error::Notsup);
         }
     }
 
@@ -239,16 +243,16 @@ pub(crate) fn open(
         Ok(file_type) => {
             // check if we are trying to open a symlink
             if file_type.is_symlink() {
-                return Err(Errno::Loop);
+                return Err(Error::Loop);
             }
             // check if we are trying to open a file as a dir
-            if file_type.is_file() && oflags.contains(&types::Oflags::DIRECTORY) {
-                return Err(Errno::Notdir);
+            if file_type.is_file() && oflags.contains(&Oflags::DIRECTORY) {
+                return Err(Error::Notdir);
             }
         }
         Err(err) => match err.raw_os_error() {
             Some(code) => {
-                log::debug!("path_open at symlink_metadata error code={:?}", code);
+                tracing::debug!("path_open at symlink_metadata error code={:?}", code);
                 match code as u32 {
                     winerror::ERROR_FILE_NOT_FOUND => {
                         // file not found, let it proceed to actually
@@ -257,14 +261,14 @@ pub(crate) fn open(
                     winerror::ERROR_INVALID_NAME => {
                         // TODO rethink this. For now, migrate how we handled
                         // it in `path::openat` on Windows.
-                        return Err(Errno::Notdir);
+                        return Err(Error::Notdir);
                     }
                     _ => return Err(err.into()),
                 };
             }
             None => {
-                log::debug!("Inconvertible OS error: {}", err);
-                return Err(Errno::Io);
+                tracing::debug!("Inconvertible OS error: {}", err);
+                return Err(Error::Io);
             }
         },
     }
@@ -299,8 +303,8 @@ pub(crate) fn readlink(dirfd: &OsDir, path: &str, buf: &mut [u8]) -> Result<usiz
     let dir_path = PathBuf::from(strip_extended_prefix(dir_path));
     let target_path = target_path
         .strip_prefix(dir_path)
-        .map_err(|_| Errno::Notcapable)
-        .and_then(|path| path.to_str().map(String::from).ok_or(Errno::Ilseq))?;
+        .map_err(|_| Error::Notcapable)
+        .and_then(|path| path.to_str().map(String::from).ok_or(Error::Ilseq))?;
 
     if buf.len() > 0 {
         let mut chars = target_path.chars();
@@ -338,12 +342,12 @@ pub(crate) fn rename(
     //
     // [std::fs::rename]: https://doc.rust-lang.org/std/fs/fn.rename.html
     if old_path.is_dir() && new_path.is_file() {
-        return Err(Errno::Notdir);
+        return Err(Error::Notdir);
     }
     // Second sanity check: check we're not trying to rename a file into a path
     // ending in a trailing slash.
     if old_path.is_file() && new_path_.ends_with('/') {
-        return Err(Errno::Notdir);
+        return Err(Error::Notdir);
     }
 
     // TODO handle symlinks
@@ -353,13 +357,13 @@ pub(crate) fn rename(
     };
     match err.raw_os_error() {
         Some(code) => {
-            log::debug!("path_rename at rename error code={:?}", code);
+            tracing::debug!("path_rename at rename error code={:?}", code);
             match code as u32 {
                 winerror::ERROR_ACCESS_DENIED => {
                     // So most likely dealing with new_path == dir.
                     // Eliminate case old_path == file first.
                     if old_path.is_file() {
-                        return Err(Errno::Isdir);
+                        return Err(Error::Isdir);
                     } else {
                         // Ok, let's try removing an empty dir at new_path if it exists
                         // and is a nonempty dir.
@@ -375,7 +379,7 @@ pub(crate) fn rename(
                         strip_trailing_slashes_and_concatenate(old_dirfd, old_path_)?
                     {
                         if path.is_file() {
-                            return Err(Errno::Notdir);
+                            return Err(Error::Notdir);
                         }
                     }
                 }
@@ -385,8 +389,8 @@ pub(crate) fn rename(
             Err(err.into())
         }
         None => {
-            log::debug!("Inconvertible OS error: {}", err);
-            Err(Errno::Io)
+            tracing::debug!("Inconvertible OS error: {}", err);
+            Err(Error::Io)
         }
     }
 }
@@ -417,7 +421,7 @@ pub(crate) fn symlink(old_path: &str, new_dirfd: &OsDir, new_path_: &str) -> Res
     };
     match err.raw_os_error() {
         Some(code) => {
-            log::debug!("path_symlink at symlink_file error code={:?}", code);
+            tracing::debug!("path_symlink at symlink_file error code={:?}", code);
             match code as u32 {
                 // If the target contains a trailing slash, the Windows API returns
                 // ERROR_INVALID_NAME (which corresponds to ENOENT) instead of
@@ -432,7 +436,7 @@ pub(crate) fn symlink(old_path: &str, new_dirfd: &OsDir, new_path_: &str) -> Res
                         strip_trailing_slashes_and_concatenate(new_dirfd, new_path_)?
                     {
                         if path.exists() {
-                            return Err(Errno::Exist);
+                            return Err(Error::Exist);
                         }
                     }
                 }
@@ -442,8 +446,8 @@ pub(crate) fn symlink(old_path: &str, new_dirfd: &OsDir, new_path_: &str) -> Res
             Err(err.into())
         }
         None => {
-            log::debug!("Inconvertible OS error: {}", err);
-            Err(Errno::Io)
+            tracing::debug!("Inconvertible OS error: {}", err);
+            Err(Error::Io)
         }
     }
 }
@@ -468,7 +472,7 @@ pub(crate) fn unlink_file(dirfd: &OsDir, path: &str) -> Result<()> {
         };
         match err.raw_os_error() {
             Some(code) => {
-                log::debug!("path_unlink_file at symlink_file error code={:?}", code);
+                tracing::debug!("path_unlink_file at symlink_file error code={:?}", code);
                 if code as u32 == winerror::ERROR_ACCESS_DENIED {
                     // try unlinking a dir symlink instead
                     return fs::remove_dir(path).map_err(Into::into);
@@ -477,16 +481,16 @@ pub(crate) fn unlink_file(dirfd: &OsDir, path: &str) -> Result<()> {
                 Err(err.into())
             }
             None => {
-                log::debug!("Inconvertible OS error: {}", err);
-                Err(Errno::Io)
+                tracing::debug!("Inconvertible OS error: {}", err);
+                Err(Error::Io)
             }
         }
     } else if file_type.is_dir() {
-        Err(Errno::Isdir)
+        Err(Error::Isdir)
     } else if file_type.is_file() {
         fs::remove_file(path).map_err(Into::into)
     } else {
-        Err(Errno::Inval)
+        Err(Error::Inval)
     }
 }
 
@@ -495,7 +499,7 @@ pub(crate) fn remove_directory(dirfd: &OsDir, path: &str) -> Result<()> {
     std::fs::remove_dir(&path).map_err(Into::into)
 }
 
-pub(crate) fn filestat_get_at(dirfd: &OsDir, path: &str, follow: bool) -> Result<types::Filestat> {
+pub(crate) fn filestat_get_at(dirfd: &OsDir, path: &str, follow: bool) -> Result<Filestat> {
     use winx::file::Flags;
     let path = concatenate(dirfd, path)?;
     let mut opts = OpenOptions::new();
@@ -513,9 +517,9 @@ pub(crate) fn filestat_get_at(dirfd: &OsDir, path: &str, follow: bool) -> Result
 pub(crate) fn filestat_set_times_at(
     dirfd: &OsDir,
     path: &str,
-    atim: types::Timestamp,
-    mtim: types::Timestamp,
-    fst_flags: types::Fstflags,
+    atim: Timestamp,
+    mtim: Timestamp,
+    fst_flags: Fstflags,
     follow: bool,
 ) -> Result<()> {
     use winx::file::{AccessMode, Flags};

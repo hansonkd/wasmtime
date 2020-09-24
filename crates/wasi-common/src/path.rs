@@ -1,9 +1,8 @@
 use crate::entry::Entry;
-use crate::handle::{Handle, HandleRights};
-use crate::wasi::{types, Errno, Result};
+use crate::handle::{Fdflags, Filetype, Handle, HandleRights, Lookupflags, Oflags};
+use crate::{Error, Result};
 use std::path::{Component, Path};
 use std::str;
-use wiggle::GuestPtr;
 
 pub(crate) use crate::sys::path::{from_host, open_rights};
 
@@ -13,25 +12,22 @@ pub(crate) use crate::sys::path::{from_host, open_rights};
 pub(crate) fn get(
     entry: &Entry,
     required_rights: &HandleRights,
-    dirflags: types::Lookupflags,
-    path_ptr: &GuestPtr<'_, str>,
+    dirflags: Lookupflags,
+    path: &str,
     needs_final_component: bool,
 ) -> Result<(Box<dyn Handle>, String)> {
     const MAX_SYMLINK_EXPANSIONS: usize = 128;
 
-    // Extract path as &str from guest's memory.
-    let path = path_ptr.as_str()?;
-
-    log::trace!("     | (path_ptr,path_len)='{}'", &*path);
+    tracing::trace!(path = path);
 
     if path.contains('\0') {
         // if contains NUL, return Ilseq
-        return Err(Errno::Ilseq);
+        return Err(Error::Ilseq);
     }
 
-    if entry.get_file_type() != types::Filetype::Directory {
+    if entry.get_file_type() != Filetype::Directory {
         // if `dirfd` doesn't refer to a directory, return `Notdir`.
-        return Err(Errno::Notdir);
+        return Err(Error::Notdir);
     }
 
     let handle = entry.as_handle(required_rights)?;
@@ -55,12 +51,12 @@ pub(crate) fn get(
     loop {
         match path_stack.pop() {
             Some(cur_path) => {
-                log::debug!("path_get cur_path = {:?}", cur_path);
+                tracing::debug!(cur_path = tracing::field::display(&cur_path), "path get");
 
                 let ends_with_slash = cur_path.ends_with('/');
                 let mut components = Path::new(&cur_path).components();
                 let head = match components.next() {
-                    None => return Err(Errno::Noent),
+                    None => return Err(Error::Noent),
                     Some(p) => p,
                 };
                 let tail = components.as_path();
@@ -73,23 +69,23 @@ pub(crate) fn get(
                     path_stack.push(tail);
                 }
 
-                log::debug!("path_get path_stack = {:?}", path_stack);
+                tracing::debug!(path_stack = tracing::field::debug(&path_stack), "path_get");
 
                 match head {
                     Component::Prefix(_) | Component::RootDir => {
                         // path is absolute!
-                        return Err(Errno::Notcapable);
+                        return Err(Error::Notcapable);
                     }
                     Component::CurDir => {
                         // "." so skip
                     }
                     Component::ParentDir => {
                         // ".." so pop a dir
-                        let _ = dir_stack.pop().ok_or(Errno::Notcapable)?;
+                        let _ = dir_stack.pop().ok_or(Error::Notcapable)?;
 
                         // we're not allowed to pop past the original directory
                         if dir_stack.is_empty() {
-                            return Err(Errno::Notcapable);
+                            return Err(Error::Notcapable);
                         }
                     }
                     Component::Normal(head) => {
@@ -100,36 +96,36 @@ pub(crate) fn get(
                         }
 
                         if !path_stack.is_empty() || (ends_with_slash && !needs_final_component) {
-                            let fd = dir_stack.last().ok_or(Errno::Notcapable)?;
+                            let fd = dir_stack.last().ok_or(Error::Notcapable)?;
                             match fd.openat(
                                 &head,
                                 false,
                                 false,
-                                types::Oflags::DIRECTORY,
-                                types::Fdflags::empty(),
+                                Oflags::DIRECTORY,
+                                Fdflags::empty(),
                             ) {
                                 Ok(new_dir) => {
                                     dir_stack.push(new_dir);
                                 }
                                 Err(e) => {
                                     match e {
-                                        Errno::Loop | Errno::Mlink | Errno::Notdir =>
+                                        Error::Loop | Error::Mlink | Error::Notdir =>
                                         // Check to see if it was a symlink. Linux indicates
                                         // this with ENOTDIR because of the O_DIRECTORY flag.
                                         {
                                             // attempt symlink expansion
-                                            let fd = dir_stack.last().ok_or(Errno::Notcapable)?;
+                                            let fd = dir_stack.last().ok_or(Error::Notcapable)?;
                                             let mut link_path = fd.readlinkat(&head)?;
                                             symlink_expansions += 1;
                                             if symlink_expansions > MAX_SYMLINK_EXPANSIONS {
-                                                return Err(Errno::Loop);
+                                                return Err(Error::Loop);
                                             }
 
                                             if head.ends_with('/') {
                                                 link_path.push('/');
                                             }
 
-                                            log::debug!(
+                                            tracing::debug!(
                                                 "attempted symlink expansion link_path={:?}",
                                                 link_path
                                             );
@@ -144,24 +140,23 @@ pub(crate) fn get(
                             }
 
                             continue;
-                        } else if ends_with_slash
-                            || dirflags.contains(&types::Lookupflags::SYMLINK_FOLLOW)
+                        } else if ends_with_slash || dirflags.contains(&Lookupflags::SYMLINK_FOLLOW)
                         {
                             // if there's a trailing slash, or if `LOOKUP_SYMLINK_FOLLOW` is set, attempt
                             // symlink expansion
-                            let fd = dir_stack.last().ok_or(Errno::Notcapable)?;
+                            let fd = dir_stack.last().ok_or(Error::Notcapable)?;
                             match fd.readlinkat(&head) {
                                 Ok(mut link_path) => {
                                     symlink_expansions += 1;
                                     if symlink_expansions > MAX_SYMLINK_EXPANSIONS {
-                                        return Err(Errno::Loop);
+                                        return Err(Error::Loop);
                                     }
 
                                     if head.ends_with('/') {
                                         link_path.push('/');
                                     }
 
-                                    log::debug!(
+                                    tracing::debug!(
                                         "attempted symlink expansion link_path={:?}",
                                         link_path
                                     );
@@ -169,29 +164,26 @@ pub(crate) fn get(
                                     path_stack.push(link_path);
                                     continue;
                                 }
+                                Err(Error::Inval) | Err(Error::Noent) | Err(Error::Notdir) => {
+                                    // this handles the cases when trying to link to
+                                    // a destination that already exists, and the target
+                                    // path contains a slash
+                                }
                                 Err(e) => {
-                                    if e != Errno::Inval
-                                        && e != Errno::Noent
-                                        // this handles the cases when trying to link to
-                                        // a destination that already exists, and the target
-                                        // path contains a slash
-                                        && e != Errno::Notdir
-                                    {
-                                        return Err(e);
-                                    }
+                                    return Err(e);
                                 }
                             }
                         }
 
                         // not a symlink, so we're done;
-                        return Ok((dir_stack.pop().ok_or(Errno::Notcapable)?, head));
+                        return Ok((dir_stack.pop().ok_or(Error::Notcapable)?, head));
                     }
                 }
             }
             None => {
                 // no further components to process. means we've hit a case like "." or "a/..", or if the
                 // input path has trailing slashes and `needs_final_component` is not set
-                return Ok((dir_stack.pop().ok_or(Errno::Notcapable)?, String::from(".")));
+                return Ok((dir_stack.pop().ok_or(Error::Notcapable)?, String::from(".")));
             }
         }
     }

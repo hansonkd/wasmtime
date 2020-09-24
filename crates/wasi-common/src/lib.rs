@@ -23,19 +23,22 @@
 
 mod ctx;
 mod entry;
+mod error;
 mod fdpool;
 pub mod fs;
 mod handle;
 pub mod old;
 mod path;
-mod poll;
 mod sandboxed_tty_writer;
+pub(crate) mod sched;
 pub mod snapshots;
+mod string_array;
 mod sys;
 pub mod virtfs;
 pub mod wasi;
 
 pub use ctx::{WasiCtx, WasiCtxBuilder, WasiCtxBuilderError};
+pub use error::{Error, Result};
 pub use handle::{Handle, HandleRights};
 pub use sys::osdir::OsDir;
 pub use sys::osfile::OsFile;

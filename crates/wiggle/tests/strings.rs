@@ -3,7 +3,7 @@ use wiggle::{GuestMemory, GuestPtr};
 use wiggle_test::{impl_errno, HostMemory, MemArea, MemAreas, WasiCtx};
 
 wiggle::from_witx!({
-    witx: ["tests/strings.witx"],
+    witx: ["$CARGO_MANIFEST_DIR/tests/strings.witx"],
     ctx: WasiCtx,
 });
 
@@ -125,7 +125,11 @@ impl MultiStringExercise {
                     Just(a.clone()),
                     Just(b.clone()),
                     Just(c.clone()),
-                    HostMemory::byte_slice_strat(a.len() as u32, &MemAreas::from([return_ptr_loc])),
+                    HostMemory::byte_slice_strat(
+                        a.len() as u32,
+                        1,
+                        &MemAreas::from([return_ptr_loc]),
+                    ),
                     Just(return_ptr_loc),
                 )
             })
@@ -137,6 +141,7 @@ impl MultiStringExercise {
                     Just(sa_ptr_loc),
                     HostMemory::byte_slice_strat(
                         b.len() as u32,
+                        1,
                         &MemAreas::from([sa_ptr_loc, return_ptr_loc]),
                     ),
                     Just(return_ptr_loc),
@@ -151,6 +156,7 @@ impl MultiStringExercise {
                     Just(sb_ptr_loc),
                     HostMemory::byte_slice_strat(
                         c.len() as u32,
+                        1,
                         &MemAreas::from([sa_ptr_loc, sb_ptr_loc, return_ptr_loc]),
                     ),
                     Just(return_ptr_loc),

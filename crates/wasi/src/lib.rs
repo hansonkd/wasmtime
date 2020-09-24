@@ -9,8 +9,9 @@ pub use wasi_common::{WasiCtx, WasiCtxBuilder};
 wasmtime_wiggle::wasmtime_integration!({
     // The wiggle code to integrate with lives here:
     target: wasi_common::wasi,
-    // This must be the same witx document as used above:
-    witx: ["phases/snapshot/witx/wasi_snapshot_preview1.witx"],
+    // This must be the same witx document as used above. This should be ensured by
+    // the `WASI_ROOT` env variable, which is set in wasi-common's `build.rs`.
+    witx: ["$WASI_ROOT/phases/snapshot/witx/wasi_snapshot_preview1.witx"],
     // This must be the same ctx type as used for the target:
     ctx: WasiCtx,
     // This macro will emit a struct to represent the instance,
@@ -32,7 +33,7 @@ resolution.",
         },
     },
     // Error to return when caller module is missing memory export:
-    missing_memory: { wasi_common::wasi::Errno::Inval },
+    missing_memory: { wasi_common::wasi::types::Errno::Inval },
 });
 
 pub fn is_wasi_module(name: &str) -> bool {

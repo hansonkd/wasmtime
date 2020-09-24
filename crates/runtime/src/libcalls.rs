@@ -67,6 +67,9 @@ use wasmtime_environ::wasm::{
     TableIndex,
 };
 
+const TOINT_32: f32 = 1.0 / f32::EPSILON;
+const TOINT_64: f64 = 1.0 / f64::EPSILON;
+
 /// Implementation of f32.ceil
 pub extern "C" fn wasmtime_f32_ceil(x: f32) -> f32 {
     x.ceil()
@@ -85,26 +88,25 @@ pub extern "C" fn wasmtime_f32_trunc(x: f32) -> f32 {
 /// Implementation of f32.nearest
 #[allow(clippy::float_arithmetic, clippy::float_cmp)]
 pub extern "C" fn wasmtime_f32_nearest(x: f32) -> f32 {
-    // Rust doesn't have a nearest function, so do it manually.
-    if x == 0.0 {
-        // Preserve the sign of zero.
+    // Rust doesn't have a nearest function; there's nearbyint, but it's not
+    // stabilized, so do it manually.
+    // Nearest is either ceil or floor depending on which is nearest or even.
+    // This approach exploited round half to even default mode.
+    let i = x.to_bits();
+    let e = i >> 23 & 0xff;
+    if e >= 0x7f_u32 + 23 {
+        // Check for NaNs.
+        if e == 0xff {
+            // Read the 23-bits significand.
+            if i & 0x7fffff != 0 {
+                // Ensure it's arithmetic by setting the significand's most
+                // significant bit to 1; it also works for canonical NaNs.
+                return f32::from_bits(i | (1 << 22));
+            }
+        }
         x
     } else {
-        // Nearest is either ceil or floor depending on which is nearest or even.
-        let u = x.ceil();
-        let d = x.floor();
-        let um = (x - u).abs();
-        let dm = (x - d).abs();
-        if um < dm
-            || (um == dm && {
-                let h = u / 2.;
-                h.floor() == h
-            })
-        {
-            u
-        } else {
-            d
-        }
+        (x.abs() + TOINT_32 - TOINT_32).copysign(x)
     }
 }
 
@@ -161,26 +163,25 @@ pub extern "C" fn wasmtime_f64_trunc(x: f64) -> f64 {
 /// Implementation of f64.nearest
 #[allow(clippy::float_arithmetic, clippy::float_cmp)]
 pub extern "C" fn wasmtime_f64_nearest(x: f64) -> f64 {
-    // Rust doesn't have a nearest function, so do it manually.
-    if x == 0.0 {
-        // Preserve the sign of zero.
+    // Rust doesn't have a nearest function; there's nearbyint, but it's not
+    // stabilized, so do it manually.
+    // Nearest is either ceil or floor depending on which is nearest or even.
+    // This approach exploited round half to even default mode.
+    let i = x.to_bits();
+    let e = i >> 52 & 0x7ff;
+    if e >= 0x3ff_u64 + 52 {
+        // Check for NaNs.
+        if e == 0x7ff {
+            // Read the 52-bits significand.
+            if i & 0xfffffffffffff != 0 {
+                // Ensure it's arithmetic by setting the significand's most
+                // significant bit to 1; it also works for canonical NaNs.
+                return f64::from_bits(i | (1 << 51));
+            }
+        }
         x
     } else {
-        // Nearest is either ceil or floor depending on which is nearest or even.
-        let u = x.ceil();
-        let d = x.floor();
-        let um = (x - u).abs();
-        let dm = (x - d).abs();
-        if um < dm
-            || (um == dm && {
-                let h = u / 2.;
-                h.floor() == h
-            })
-        {
-            u
-        } else {
-            d
-        }
+        (x.abs() + TOINT_64 - TOINT_64).copysign(x)
     }
 }
 

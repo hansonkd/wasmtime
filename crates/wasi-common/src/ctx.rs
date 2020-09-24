@@ -1,21 +1,21 @@
 use crate::entry::{Entry, EntryHandle};
 use crate::fdpool::FdPool;
 use crate::handle::Handle;
+use crate::string_array::{PendingString, StringArray, StringArrayError};
 use crate::sys::osdir::OsDir;
 use crate::sys::stdio::NullDevice;
 use crate::sys::stdio::{Stderr, StderrExt, Stdin, StdinExt, Stdout, StdoutExt};
 use crate::virtfs::{VirtualDir, VirtualDirEntry};
-use crate::wasi::types;
-use crate::wasi::{Errno, Result};
+use crate::wasi::types::Fd;
+use crate::Error;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::ffi::{self, CString, OsString};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::{env, io, string};
+use std::{env, io};
 
 /// Possible errors when `WasiCtxBuilder` fails building
 /// `WasiCtx`.
@@ -24,17 +24,12 @@ pub enum WasiCtxBuilderError {
     /// General I/O error was encountered.
     #[error("general I/O error encountered: {0}")]
     Io(#[from] io::Error),
-    /// Provided sequence of bytes was not a valid UTF-8.
-    #[error("provided sequence is not valid UTF-8: {0}")]
-    InvalidUtf8(#[from] string::FromUtf8Error),
-    /// Provided sequence of bytes was not a valid UTF-16.
-    ///
-    /// This error is expected to only occur on Windows hosts.
-    #[error("provided sequence is not valid UTF-16: {0}")]
-    InvalidUtf16(#[from] string::FromUtf16Error),
-    /// Provided sequence of bytes contained an unexpected NUL byte.
-    #[error("provided sequence contained an unexpected NUL byte")]
-    UnexpectedNul(#[from] ffi::NulError),
+    /// Error constructing arguments
+    #[error("while constructing arguments: {0}")]
+    Args(#[source] StringArrayError),
+    /// Error constructing environment
+    #[error("while constructing environment: {0}")]
+    Env(#[source] StringArrayError),
     /// The root of a VirtualDirEntry tree must be a VirtualDirEntry::Directory.
     #[error("the root of a VirtualDirEntry tree at {} must be a VirtualDirEntry::Directory", .0.display())]
     VirtualDirEntryRootNotADirectory(PathBuf),
@@ -63,51 +58,6 @@ impl std::fmt::Debug for PendingEntry {
     }
 }
 
-#[derive(Debug, Eq, Hash, PartialEq)]
-enum PendingCString {
-    Bytes(Vec<u8>),
-    OsString(OsString),
-}
-
-impl From<Vec<u8>> for PendingCString {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self::Bytes(bytes)
-    }
-}
-
-impl From<OsString> for PendingCString {
-    fn from(s: OsString) -> Self {
-        Self::OsString(s)
-    }
-}
-
-impl PendingCString {
-    fn into_string(self) -> WasiCtxBuilderResult<String> {
-        let res = match self {
-            Self::Bytes(v) => String::from_utf8(v)?,
-            #[cfg(unix)]
-            Self::OsString(s) => {
-                use std::os::unix::ffi::OsStringExt;
-                String::from_utf8(s.into_vec())?
-            }
-            #[cfg(windows)]
-            Self::OsString(s) => {
-                use std::os::windows::ffi::OsStrExt;
-                let bytes: Vec<u16> = s.encode_wide().collect();
-                String::from_utf16(&bytes)?
-            }
-        };
-        Ok(res)
-    }
-
-    /// Create a `CString` containing valid UTF-8.
-    fn into_utf8_cstring(self) -> WasiCtxBuilderResult<CString> {
-        let s = self.into_string()?;
-        let s = CString::new(s)?;
-        Ok(s)
-    }
-}
-
 struct PendingPreopen(Box<dyn FnOnce() -> WasiCtxBuilderResult<Box<dyn Handle>>>);
 
 impl PendingPreopen {
@@ -129,8 +79,8 @@ pub struct WasiCtxBuilder {
     stdout: Option<PendingEntry>,
     stderr: Option<PendingEntry>,
     preopens: Option<Vec<(PathBuf, PendingPreopen)>>,
-    args: Option<Vec<PendingCString>>,
-    env: Option<HashMap<PendingCString, PendingCString>>,
+    args: Option<Vec<PendingString>>,
+    env: Option<HashMap<PendingString, PendingString>>,
 }
 
 impl WasiCtxBuilder {
@@ -179,7 +129,7 @@ impl WasiCtxBuilder {
     pub fn inherit_args(&mut self) -> &mut Self {
         let args = self.args.as_mut().unwrap();
         args.clear();
-        args.extend(env::args_os().map(PendingCString::OsString));
+        args.extend(env::args_os().map(PendingString::OsString));
         self
     }
 
@@ -323,34 +273,13 @@ impl WasiCtxBuilder {
     /// If any of the arguments or environment variables in this builder cannot be converted into
     /// `CString`s, either due to NUL bytes or Unicode conversions, this will fail.
     pub fn build(&mut self) -> WasiCtxBuilderResult<WasiCtx> {
-        // Process arguments and environment variables into `CString`s, failing quickly if they
+        // Process arguments and environment variables into `String`s, failing quickly if they
         // contain any NUL bytes, or if conversion from `OsString` fails.
-        let args = self
-            .args
-            .take()
-            .unwrap()
-            .into_iter()
-            .map(|arg| arg.into_utf8_cstring())
-            .collect::<WasiCtxBuilderResult<Vec<CString>>>()?;
-
-        let env = self
-            .env
-            .take()
-            .unwrap()
-            .into_iter()
-            .map(|(k, v)| {
-                k.into_string().and_then(|mut pair| {
-                    v.into_string().and_then(|v| {
-                        pair.push('=');
-                        pair.push_str(v.as_str());
-                        // We have valid UTF-8, but the keys and values have not yet been checked
-                        // for NULs, so we do a final check here.
-                        let s = CString::new(pair)?;
-                        Ok(s)
-                    })
-                })
-            })
-            .collect::<WasiCtxBuilderResult<Vec<CString>>>()?;
+        let args =
+            StringArray::from_pending_vec(self.args.take().expect("WasiCtxBuilder has args"))
+                .map_err(WasiCtxBuilderError::Args)?;
+        let env = StringArray::from_pending_map(self.env.take().expect("WasiCtxBuilder has env"))
+            .map_err(WasiCtxBuilderError::Env)?;
 
         let mut entries = EntryTable::new();
         // Populate the non-preopen entries.
@@ -359,7 +288,10 @@ impl WasiCtxBuilder {
             self.stdout.take().unwrap(),
             self.stderr.take().unwrap(),
         ] {
-            log::debug!("WasiCtx inserting entry {:?}", pending);
+            tracing::debug!(
+                pending = tracing::field::debug(&pending),
+                "WasiCtx inserting entry"
+            );
             let fd = match pending {
                 PendingEntry::Thunk(f) => {
                     let handle = EntryHandle::from(f()?);
@@ -376,7 +308,7 @@ impl WasiCtxBuilder {
                         .ok_or(WasiCtxBuilderError::TooManyFilesOpen)?
                 }
             };
-            log::debug!("WasiCtx inserted at {:?}", fd);
+            tracing::debug!(fd = tracing::field::debug(fd), "WasiCtx inserted");
         }
         // Then add the preopen entries.
         for (guest_path, preopen) in self.preopens.take().unwrap() {
@@ -386,7 +318,7 @@ impl WasiCtxBuilder {
             let fd = entries
                 .insert(entry)
                 .ok_or(WasiCtxBuilderError::TooManyFilesOpen)?;
-            log::debug!("WasiCtx inserted at {:?}", fd);
+            tracing::debug!(fd = tracing::field::debug(fd), "WasiCtx inserted",);
         }
 
         Ok(WasiCtx {
@@ -399,7 +331,7 @@ impl WasiCtxBuilder {
 
 struct EntryTable {
     fd_pool: FdPool,
-    entries: HashMap<types::Fd, Rc<Entry>>,
+    entries: HashMap<Fd, Rc<Entry>>,
 }
 
 impl EntryTable {
@@ -410,25 +342,25 @@ impl EntryTable {
         }
     }
 
-    fn contains(&self, fd: &types::Fd) -> bool {
+    fn contains(&self, fd: &Fd) -> bool {
         self.entries.contains_key(fd)
     }
 
-    fn insert(&mut self, entry: Entry) -> Option<types::Fd> {
+    fn insert(&mut self, entry: Entry) -> Option<Fd> {
         let fd = self.fd_pool.allocate()?;
         self.entries.insert(fd, Rc::new(entry));
         Some(fd)
     }
 
-    fn insert_at(&mut self, fd: &types::Fd, entry: Rc<Entry>) {
+    fn insert_at(&mut self, fd: &Fd, entry: Rc<Entry>) {
         self.entries.insert(*fd, entry);
     }
 
-    fn get(&self, fd: &types::Fd) -> Option<Rc<Entry>> {
+    fn get(&self, fd: &Fd) -> Option<Rc<Entry>> {
         self.entries.get(fd).map(Rc::clone)
     }
 
-    fn remove(&mut self, fd: types::Fd) -> Option<Rc<Entry>> {
+    fn remove(&mut self, fd: Fd) -> Option<Rc<Entry>> {
         let entry = self.entries.remove(&fd)?;
         self.fd_pool.deallocate(fd);
         Some(entry)
@@ -437,8 +369,8 @@ impl EntryTable {
 
 pub struct WasiCtx {
     entries: RefCell<EntryTable>,
-    pub(crate) args: Vec<CString>,
-    pub(crate) env: Vec<CString>,
+    pub(crate) args: StringArray,
+    pub(crate) env: StringArray,
 }
 
 impl WasiCtx {
@@ -458,15 +390,15 @@ impl WasiCtx {
     }
 
     /// Check if `WasiCtx` contains the specified raw WASI `fd`.
-    pub(crate) fn contains_entry(&self, fd: types::Fd) -> bool {
+    pub(crate) fn contains_entry(&self, fd: Fd) -> bool {
         self.entries.borrow().contains(&fd)
     }
 
     /// Get an immutable `Entry` corresponding to the specified raw WASI `fd`.
-    pub(crate) fn get_entry(&self, fd: types::Fd) -> Result<Rc<Entry>> {
+    pub(crate) fn get_entry(&self, fd: Fd) -> Result<Rc<Entry>, Error> {
         match self.entries.borrow().get(&fd) {
             Some(entry) => Ok(entry),
-            None => Err(Errno::Badf),
+            None => Err(Error::Badf),
         }
     }
 
@@ -474,18 +406,28 @@ impl WasiCtx {
     ///
     /// The `Entry` will automatically get another free raw WASI `fd` assigned. Note that
     /// the two subsequent free raw WASI `fd`s do not have to be stored contiguously.
-    pub(crate) fn insert_entry(&self, entry: Entry) -> Result<types::Fd> {
-        self.entries.borrow_mut().insert(entry).ok_or(Errno::Mfile)
+    pub(crate) fn insert_entry(&self, entry: Entry) -> Result<Fd, Error> {
+        self.entries.borrow_mut().insert(entry).ok_or(Error::Mfile)
     }
 
     /// Insert the specified `Entry` with the specified raw WASI `fd` key into the `WasiCtx`
     /// object.
-    pub(crate) fn insert_entry_at(&self, fd: types::Fd, entry: Rc<Entry>) {
+    pub(crate) fn insert_entry_at(&self, fd: Fd, entry: Rc<Entry>) {
         self.entries.borrow_mut().insert_at(&fd, entry)
     }
 
     /// Remove `Entry` corresponding to the specified raw WASI `fd` from the `WasiCtx` object.
-    pub(crate) fn remove_entry(&self, fd: types::Fd) -> Result<Rc<Entry>> {
-        self.entries.borrow_mut().remove(fd).ok_or(Errno::Badf)
+    pub(crate) fn remove_entry(&self, fd: Fd) -> Result<Rc<Entry>, Error> {
+        self.entries.borrow_mut().remove(fd).ok_or(Error::Badf)
     }
+
+    /*
+    pub(crate) fn args(&self) -> &impl StringArrayWriter {
+        &self.args
+    }
+
+    pub(crate) fn env(&self) -> &impl StringArrayWriter {
+        &self.env
+    }
+    */
 }

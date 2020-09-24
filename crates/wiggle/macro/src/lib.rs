@@ -11,7 +11,7 @@ use syn::parse_macro_input;
 ///   CamelCase.
 ///
 /// * For each `module` defined in the witx document, a Rust module is defined
-///   containing definitions for that module. Module names are teanslated to the
+///   containing definitions for that module. Module names are translated to the
 ///   Rust-idiomatic snake\_case.
 ///
 ///     * For each `@interface func` defined in a witx module, an abi-level
@@ -90,10 +90,7 @@ use syn::parse_macro_input;
 /// ```
 #[proc_macro]
 pub fn from_witx(args: TokenStream) -> TokenStream {
-    let mut config = parse_macro_input!(args as wiggle_generate::Config);
-    config.witx.make_paths_relative_to(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR env var"),
-    );
+    let config = parse_macro_input!(args as wiggle_generate::Config);
 
     let doc = config.load_document();
     let names = wiggle_generate::Names::new(&config.ctx.name, quote!(wiggle));

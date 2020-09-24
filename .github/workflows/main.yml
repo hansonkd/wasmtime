@@ -57,7 +57,7 @@ jobs:
         submodules: true
     - uses: ./.github/actions/install-rust
       with:
-        toolchain: nightly
+        toolchain: nightly-2020-08-25
     - run: cargo doc --no-deps --all --exclude wasmtime-cli --exclude test-programs --exclude cranelift-codegen-meta
     - run: cargo doc --package cranelift-codegen-meta --document-private-items
     - uses: actions/upload-artifact@v1
@@ -92,7 +92,7 @@ jobs:
         submodules: true
     - uses: ./.github/actions/install-rust
       with:
-        toolchain: nightly
+        toolchain: nightly-2020-08-25
 
     # Check some feature combinations of the `wasmtime` crate
     - run: cargo check --manifest-path crates/wasmtime/Cargo.toml --no-default-features
@@ -124,12 +124,11 @@ jobs:
     - run: cargo check --target wasm32-unknown-emscripten -p wasi-common
     - run: cargo check --target armv7-unknown-linux-gnueabihf -p wasi-common
 
-    # Check that codegen and wasm crates typecheck on 1.41.0; this is required
+    # Check that codegen and wasm crates typecheck on 1.43.0; this is required
     # for Firefox.
-    - run: rustup install 1.41.0
-    - run: cargo +1.41.0 check -p cranelift-codegen
-    - run: cargo +1.41.0 check -p cranelift-wasm
-    - run: cargo +1.41.0 check -p cranelift-tools
+    - run: rustup install 1.43.0
+    - run: cargo +1.43.0 check -p cranelift-codegen
+    - run: cargo +1.43.0 check -p cranelift-wasm
 
 
   fuzz_targets:
@@ -141,7 +140,7 @@ jobs:
         submodules: true
     - uses: ./.github/actions/install-rust
       with:
-        toolchain: nightly
+        toolchain: nightly-2020-08-25
     - run: cargo install cargo-fuzz --vers "^0.8"
     - run: cargo fetch
       working-directory: ./fuzz
@@ -162,7 +161,8 @@ jobs:
           --package peepmatic-fuzzing \
           --package peepmatic-macro \
           --package peepmatic-runtime \
-          --package peepmatic-test
+          --package peepmatic-test \
+          --package peepmatic-souper
     - name: Rebuild Peepmatic-based peephole optimizers and test them
       run: |
         cargo test \
@@ -192,7 +192,7 @@ jobs:
             rust: beta
           - build: nightly
             os: ubuntu-latest
-            rust: nightly
+            rust: nightly-2020-08-25
           - build: macos
             os: macos-latest
             rust: stable
@@ -248,7 +248,8 @@ jobs:
             --exclude peepmatic-fuzzing \
             --exclude peepmatic-macro \
             --exclude peepmatic-runtime \
-            --exclude peepmatic-test
+            --exclude peepmatic-test \
+            --exclude peepmatic-souper
       env:
         RUST_BACKTRACE: 1
 
@@ -268,6 +269,32 @@ jobs:
       if: matrix.build == 'nightly'
       continue-on-error: true
       env:
+        RUST_BACKTRACE: 1
+
+  # Perform all tests (debug mode) for `wasmtime` with the experimental x64
+  # backend. This runs on the nightly channel of Rust (because of issues with
+  # unifying Cargo features on stable) on Ubuntu.
+  test_x64:
+    name: Test x64 new backend
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+    - uses: ./.github/actions/install-rust
+      with:
+        toolchain: nightly-2020-08-25
+    - uses: ./.github/actions/define-llvm-env
+
+    # Install wasm32 targets in order to build various tests throughout the
+    # repo.
+    - run: rustup target add wasm32-wasi
+    - run: rustup target add wasm32-unknown-unknown
+
+    # Run the x64 CI script.
+    - run: ./ci/run-experimental-x64-ci.sh
+      env:
+        CARGO_VERSION: "+nightly-2020-08-25"
         RUST_BACKTRACE: 1
 
   # Verify that cranelift's code generation is deterministic
@@ -383,6 +410,7 @@ jobs:
             --exclude peepmatic-macro \
             --exclude peepmatic-runtime \
             --exclude peepmatic-test \
+            --exclude peepmatic-souper \
             --exclude wasmtime-fuzz
       env:
         RUST_BACKTRACE: 1

@@ -3,7 +3,7 @@ use wiggle::{GuestMemory, GuestPtr};
 use wiggle_test::{impl_errno, HostMemory, MemArea, MemAreas, WasiCtx};
 
 wiggle::from_witx!({
-    witx: ["tests/structs.witx"],
+    witx: ["$CARGO_MANIFEST_DIR/tests/structs.witx"],
     ctx: WasiCtx,
 });
 
@@ -473,6 +473,7 @@ impl SumArrayExercise {
                     Just(inputs.clone()),
                     HostMemory::byte_slice_strat(
                         inputs.len() as u32,
+                        1,
                         &MemAreas::from([input_struct_loc, output_loc]),
                     ),
                     Just(input_struct_loc.clone()),
