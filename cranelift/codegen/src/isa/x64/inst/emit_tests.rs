@@ -3112,6 +3112,30 @@ fn test_x64_emit() {
     ));
 
     insns.push((
+        Inst::xmm_rm_r(SseOpcode::Paddsb, RegMem::reg(xmm9), w_xmm5),
+        "66410FECE9",
+        "paddsb  %xmm9, %xmm5",
+    ));
+
+    insns.push((
+        Inst::xmm_rm_r(SseOpcode::Paddsw, RegMem::reg(xmm7), w_xmm6),
+        "660FEDF7",
+        "paddsw  %xmm7, %xmm6",
+    ));
+
+    insns.push((
+        Inst::xmm_rm_r(SseOpcode::Paddusb, RegMem::reg(xmm12), w_xmm13),
+        "66450FDCEC",
+        "paddusb %xmm12, %xmm13",
+    ));
+
+    insns.push((
+        Inst::xmm_rm_r(SseOpcode::Paddusw, RegMem::reg(xmm1), w_xmm8),
+        "66440FDDC1",
+        "paddusw %xmm1, %xmm8",
+    ));
+
+    insns.push((
         Inst::xmm_rm_r(SseOpcode::Pavgb, RegMem::reg(xmm12), w_xmm13),
         "66450FE0EC",
         "pavgb   %xmm12, %xmm13",
@@ -3241,6 +3265,12 @@ fn test_x64_emit() {
         Inst::xmm_rm_r(SseOpcode::Pxor, RegMem::reg(xmm11), w_xmm2),
         "66410FEFD3",
         "pxor    %xmm11, %xmm2",
+    ));
+
+    insns.push((
+        Inst::xmm_rm_r(SseOpcode::Pshufb, RegMem::reg(xmm11), w_xmm2),
+        "66410F3800D3",
+        "pshufb  %xmm11, %xmm2",
     ));
 
     // XMM_Mov_R_M: float stores
@@ -3441,12 +3471,12 @@ fn test_x64_emit() {
     // ========================================================
     // XmmRmRImm
     insns.push((
-        Inst::xmm_rm_r_imm(SseOpcode::Cmppd, RegMem::reg(xmm5), w_xmm1, 2),
+        Inst::xmm_rm_r_imm(SseOpcode::Cmppd, RegMem::reg(xmm5), w_xmm1, 2, false),
         "660FC2CD02",
         "cmppd   $2, %xmm5, %xmm1",
     ));
     insns.push((
-        Inst::xmm_rm_r_imm(SseOpcode::Cmpps, RegMem::reg(xmm15), w_xmm7, 0),
+        Inst::xmm_rm_r_imm(SseOpcode::Cmpps, RegMem::reg(xmm15), w_xmm7, 0, false),
         "410FC2FF00",
         "cmpps   $0, %xmm15, %xmm7",
     ));
