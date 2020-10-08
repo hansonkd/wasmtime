@@ -1,5 +1,6 @@
 //! Lowering rules for X64.
 
+use crate::data_value::DataValue;
 use crate::ir::{
     condcodes::FloatCC, condcodes::IntCC, types, AbiParam, ArgumentPurpose, ExternalName,
     Inst as IRInst, InstructionData, LibCall, Opcode, Signature, Type,
@@ -384,9 +385,10 @@ fn emit_vm_call<C: LowerCtx<I = Inst>>(
     // TODO avoid recreating signatures for every single Libcall function.
     let call_conv = CallConv::for_libcall(flags, CallConv::triple_default(triple));
     let sig = make_libcall_sig(ctx, insn, call_conv, types::I64);
+    let caller_conv = ctx.abi().call_conv();
 
     let loc = ctx.srcloc(insn);
-    let mut abi = X64ABICaller::from_func(&sig, &extname, dist, loc)?;
+    let mut abi = X64ABICaller::from_func(&sig, &extname, dist, loc, caller_conv)?;
 
     abi.emit_stack_pre_adjust(ctx);
 
@@ -1558,6 +1560,7 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
 
         Opcode::Call | Opcode::CallIndirect => {
             let loc = ctx.srcloc(insn);
+            let caller_conv = ctx.abi().call_conv();
             let (mut abi, inputs) = match op {
                 Opcode::Call => {
                     let (extname, dist) = ctx.call_target(insn).unwrap();
@@ -1565,7 +1568,7 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     assert_eq!(inputs.len(), sig.params.len());
                     assert_eq!(outputs.len(), sig.returns.len());
                     (
-                        X64ABICaller::from_func(sig, &extname, dist, loc)?,
+                        X64ABICaller::from_func(sig, &extname, dist, loc, caller_conv)?,
                         &inputs[..],
                     )
                 }
@@ -1575,7 +1578,10 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     let sig = ctx.call_sig(insn).unwrap();
                     assert_eq!(inputs.len() - 1, sig.params.len());
                     assert_eq!(outputs.len(), sig.returns.len());
-                    (X64ABICaller::from_ptr(sig, ptr, loc, op)?, &inputs[1..])
+                    (
+                        X64ABICaller::from_ptr(sig, ptr, loc, op, caller_conv)?,
+                        &inputs[1..],
+                    )
                 }
 
                 _ => unreachable!(),
@@ -2980,10 +2986,9 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             let lhs_ty = ctx.input_ty(insn, 0);
             let lhs = put_input_in_reg(ctx, inputs[0]);
             let rhs = put_input_in_reg(ctx, inputs[1]);
-            let mask = if let &InstructionData::Shuffle { mask, .. } = ctx.data(insn) {
-                ctx.get_immediate(mask).clone()
-            } else {
-                unreachable!("shuffle should always have the shuffle format")
+            let mask = match ctx.get_immediate(insn) {
+                Some(DataValue::V128(bytes)) => bytes.to_vec(),
+                _ => unreachable!("shuffle should always have a 16-byte immediate"),
             };
 
             // A mask-building helper: in 128-bit SIMD, 0-15 indicate which lane to read from and a
@@ -3310,10 +3315,10 @@ impl LowerBackend for X64Backend {
             );
             assert!(op1 == Opcode::Jump || op1 == Opcode::Fallthrough);
 
-            let taken = BranchTarget::Label(targets[0]);
+            let taken = targets[0];
             let not_taken = match op1 {
-                Opcode::Jump => BranchTarget::Label(targets[1]),
-                Opcode::Fallthrough => BranchTarget::Label(fallthrough.unwrap()),
+                Opcode::Jump => targets[1],
+                Opcode::Fallthrough => fallthrough.unwrap(),
                 _ => unreachable!(), // assert above.
             };
 
@@ -3417,7 +3422,7 @@ impl LowerBackend for X64Backend {
             let op = ctx.data(branches[0]).opcode();
             match op {
                 Opcode::Jump | Opcode::Fallthrough => {
-                    ctx.emit(Inst::jmp_known(BranchTarget::Label(targets[0])));
+                    ctx.emit(Inst::jmp_known(targets[0]));
                 }
 
                 Opcode::BrTable => {
@@ -3460,13 +3465,9 @@ impl LowerBackend for X64Backend {
                     let tmp2 = ctx.alloc_tmp(RegClass::I64, types::I64);
 
                     let targets_for_term: Vec<MachLabel> = targets.to_vec();
-                    let default_target = BranchTarget::Label(targets[0]);
+                    let default_target = targets[0];
 
-                    let jt_targets: Vec<BranchTarget> = targets
-                        .iter()
-                        .skip(1)
-                        .map(|bix| BranchTarget::Label(*bix))
-                        .collect();
+                    let jt_targets: Vec<MachLabel> = targets.iter().skip(1).cloned().collect();
 
                     ctx.emit(Inst::JmpTableSeq {
                         idx,

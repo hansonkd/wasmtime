@@ -1,15 +1,15 @@
 //! This module defines x86_64-specific machine instruction types.
-#![allow(dead_code)]
 
 use crate::binemit::{CodeOffset, StackMap};
 use crate::ir::{types, ExternalName, Opcode, SourceLoc, TrapCode, Type};
+use crate::isa::x64::settings as x64_settings;
 use crate::machinst::*;
 use crate::{settings, settings::Flags, CodegenError, CodegenResult};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use regalloc::{
-    RealRegUniverse, Reg, RegClass, RegUsageCollector, RegUsageMapper, SpillSlot, VirtualReg,
-    Writable,
+    PrettyPrint, PrettyPrintSized, RealRegUniverse, Reg, RegClass, RegUsageCollector,
+    RegUsageMapper, SpillSlot, VirtualReg, Writable,
 };
 use smallvec::SmallVec;
 use std::fmt;
@@ -368,7 +368,7 @@ pub enum Inst {
     EpiloguePlaceholder,
 
     /// Jump to a known target: jmp simm32.
-    JmpKnown { dst: BranchTarget },
+    JmpKnown { dst: MachLabel },
 
     /// One-way conditional branch: jcond cond target.
     ///
@@ -378,14 +378,14 @@ pub enum Inst {
     /// A note of caution: in contexts where the branch target is another block, this has to be the
     /// same successor as the one specified in the terminator branch of the current block.
     /// Otherwise, this might confuse register allocation by creating new invisible edges.
-    JmpIf { cc: CC, taken: BranchTarget },
+    JmpIf { cc: CC, taken: MachLabel },
 
     /// Two-way conditional branch: jcond cond target target.
     /// Emitted as a compound sequence; the MachBuffer will shrink it as appropriate.
     JmpCond {
         cc: CC,
-        taken: BranchTarget,
-        not_taken: BranchTarget,
+        taken: MachLabel,
+        not_taken: MachLabel,
     },
 
     /// Jump-table sequence, as one compound instruction (see note in lower.rs for rationale).
@@ -396,8 +396,8 @@ pub enum Inst {
         idx: Reg,
         tmp1: Writable<Reg>,
         tmp2: Writable<Reg>,
-        default_target: BranchTarget,
-        targets: Vec<BranchTarget>,
+        default_target: MachLabel,
+        targets: Vec<MachLabel>,
         targets_for_term: Vec<MachLabel>,
     },
 
@@ -499,6 +499,71 @@ pub enum Inst {
 pub(crate) fn low32_will_sign_extend_to_64(x: u64) -> bool {
     let xs = x as i64;
     xs == ((xs << 32) >> 32)
+}
+
+impl Inst {
+    fn isa_requirement(&self) -> Option<InstructionSet> {
+        match self {
+            // These instructions are part of SSE2, which is a basic requirement in Cranelift, and
+            // don't have to be checked.
+            Inst::AluRmiR { .. }
+            | Inst::AtomicRmwSeq { .. }
+            | Inst::CallKnown { .. }
+            | Inst::CallUnknown { .. }
+            | Inst::CheckedDivOrRemSeq { .. }
+            | Inst::Cmove { .. }
+            | Inst::CmpRmiR { .. }
+            | Inst::CvtFloatToSintSeq { .. }
+            | Inst::CvtFloatToUintSeq { .. }
+            | Inst::CvtUint64ToFloatSeq { .. }
+            | Inst::Div { .. }
+            | Inst::EpiloguePlaceholder
+            | Inst::Fence { .. }
+            | Inst::Hlt
+            | Inst::Imm { .. }
+            | Inst::JmpCond { .. }
+            | Inst::JmpIf { .. }
+            | Inst::JmpKnown { .. }
+            | Inst::JmpTableSeq { .. }
+            | Inst::JmpUnknown { .. }
+            | Inst::LoadEffectiveAddress { .. }
+            | Inst::LoadExtName { .. }
+            | Inst::LockCmpxchg { .. }
+            | Inst::Mov64MR { .. }
+            | Inst::MovRM { .. }
+            | Inst::MovRR { .. }
+            | Inst::MovsxRmR { .. }
+            | Inst::MovzxRmR { .. }
+            | Inst::MulHi { .. }
+            | Inst::Neg { .. }
+            | Inst::Not { .. }
+            | Inst::Nop { .. }
+            | Inst::Pop64 { .. }
+            | Inst::Push64 { .. }
+            | Inst::Ret
+            | Inst::Setcc { .. }
+            | Inst::ShiftR { .. }
+            | Inst::SignExtendData { .. }
+            | Inst::TrapIf { .. }
+            | Inst::Ud2 { .. }
+            | Inst::UnaryRmR { .. }
+            | Inst::VirtualSPOffsetAdj { .. }
+            | Inst::XmmCmove { .. }
+            | Inst::XmmCmpRmR { .. }
+            | Inst::XmmLoadConstSeq { .. }
+            | Inst::XmmMinMaxSeq { .. }
+            | Inst::XmmUninitializedValue { .. } => None,
+
+            // These use dynamic SSE opcodes.
+            Inst::GprToXmm { op, .. }
+            | Inst::XmmMovRM { op, .. }
+            | Inst::XmmRmiReg { opcode: op, .. }
+            | Inst::XmmRmR { op, .. }
+            | Inst::XmmRmRImm { op, .. }
+            | Inst::XmmToGpr { op, .. }
+            | Inst::XmmUnaryRmR { op, .. } => Some(op.available_from()),
+        }
+    }
 }
 
 // Handy constructors for Insts.
@@ -1011,15 +1076,15 @@ impl Inst {
         Inst::EpiloguePlaceholder
     }
 
-    pub(crate) fn jmp_known(dst: BranchTarget) -> Inst {
+    pub(crate) fn jmp_known(dst: MachLabel) -> Inst {
         Inst::JmpKnown { dst }
     }
 
-    pub(crate) fn jmp_if(cc: CC, taken: BranchTarget) -> Inst {
+    pub(crate) fn jmp_if(cc: CC, taken: MachLabel) -> Inst {
         Inst::JmpIf { cc, taken }
     }
 
-    pub(crate) fn jmp_cond(cc: CC, taken: BranchTarget, not_taken: BranchTarget) -> Inst {
+    pub(crate) fn jmp_cond(cc: CC, taken: MachLabel, not_taken: MachLabel) -> Inst {
         Inst::JmpCond {
             cc,
             taken,
@@ -1165,7 +1230,7 @@ impl Inst {
 //=============================================================================
 // Instructions: printing
 
-impl ShowWithRRU for Inst {
+impl PrettyPrint for Inst {
     fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
         fn ljustify(s: String) -> String {
             let w = 7;
@@ -1613,13 +1678,13 @@ impl ShowWithRRU for Inst {
             Inst::EpiloguePlaceholder => "epilogue placeholder".to_string(),
 
             Inst::JmpKnown { dst } => {
-                format!("{} {}", ljustify("jmp".to_string()), dst.show_rru(mb_rru))
+                format!("{} {}", ljustify("jmp".to_string()), dst.to_string())
             }
 
             Inst::JmpIf { cc, taken } => format!(
                 "{} {}",
                 ljustify2("j".to_string(), cc.to_string()),
-                taken.show_rru(mb_rru),
+                taken.to_string(),
             ),
 
             Inst::JmpCond {
@@ -1629,8 +1694,8 @@ impl ShowWithRRU for Inst {
             } => format!(
                 "{} {}; j {}",
                 ljustify2("j".to_string(), cc.to_string()),
-                taken.show_rru(mb_rru),
-                not_taken.show_rru(mb_rru)
+                taken.to_string(),
+                not_taken.to_string()
             ),
 
             Inst::JmpTableSeq { idx, .. } => {
@@ -2380,10 +2445,10 @@ impl MachInst for Inst {
         match self {
             // Interesting cases.
             &Self::Ret | &Self::EpiloguePlaceholder => MachTerminator::Ret,
-            &Self::JmpKnown { dst } => MachTerminator::Uncond(dst.as_label().unwrap()),
+            &Self::JmpKnown { dst } => MachTerminator::Uncond(dst),
             &Self::JmpCond {
                 taken, not_taken, ..
-            } => MachTerminator::Cond(taken.as_label().unwrap(), not_taken.as_label().unwrap()),
+            } => MachTerminator::Cond(taken, not_taken),
             &Self::JmpTableSeq {
                 ref targets_for_term,
                 ..
@@ -2401,10 +2466,12 @@ impl MachInst for Inst {
         match rc_dst {
             RegClass::I64 => Inst::mov_r_r(true, src_reg, dst_reg),
             RegClass::V128 => {
+                // The Intel optimization manual, in "3.5.1.13 Zero-Latency MOV Instructions",
+                // doesn't include MOVSS/MOVSD as instructions with zero-latency. Use movaps for
+                // those, which may write more lanes that we need, but are specified to have
+                // zero-latency.
                 let opcode = match ty {
-                    types::F32 => SseOpcode::Movss,
-                    types::F64 => SseOpcode::Movsd,
-                    types::F32X4 => SseOpcode::Movaps,
+                    types::F32 | types::F64 | types::F32X4 => SseOpcode::Movaps,
                     types::F64X2 => SseOpcode::Movapd,
                     _ if ty.is_vector() && ty.bits() == 128 => SseOpcode::Movdqa,
                     _ => unimplemented!("unable to move type: {}", ty),
@@ -2419,8 +2486,8 @@ impl MachInst for Inst {
         Inst::Nop { len: 0 }
     }
 
-    fn gen_nop(_preferred_size: usize) -> Inst {
-        unimplemented!()
+    fn gen_nop(preferred_size: usize) -> Inst {
+        Inst::nop((preferred_size % 16) as u8)
     }
 
     fn maybe_direct_reload(&self, _reg: VirtualReg, _slot: SpillSlot) -> Option<Inst> {
@@ -2451,7 +2518,7 @@ impl MachInst for Inst {
     }
 
     fn gen_jump(label: MachLabel) -> Inst {
-        Inst::jmp_known(BranchTarget::Label(label))
+        Inst::jmp_known(label)
     }
 
     fn gen_constant<F: FnMut(RegClass, Type) -> Writable<Reg>>(
@@ -2557,11 +2624,30 @@ pub struct EmitState {
     stack_map: Option<StackMap>,
 }
 
+/// Constant state used during emissions of a sequence of instructions.
+pub struct EmitInfo {
+    flags: settings::Flags,
+    isa_flags: x64_settings::Flags,
+}
+
+impl EmitInfo {
+    pub(crate) fn new(flags: settings::Flags, isa_flags: x64_settings::Flags) -> Self {
+        Self { flags, isa_flags }
+    }
+}
+
+impl MachInstEmitInfo for EmitInfo {
+    fn flags(&self) -> &Flags {
+        &self.flags
+    }
+}
+
 impl MachInstEmit for Inst {
     type State = EmitState;
+    type Info = EmitInfo;
 
-    fn emit(&self, sink: &mut MachBuffer<Inst>, flags: &settings::Flags, state: &mut Self::State) {
-        emit::emit(self, sink, flags, state);
+    fn emit(&self, sink: &mut MachBuffer<Inst>, info: &Self::Info, state: &mut Self::State) {
+        emit::emit(self, sink, info, state);
     }
 
     fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, _: &mut Self::State) -> String {
