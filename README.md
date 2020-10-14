@@ -1,3 +1,9 @@
+> NOTE: The only change this fork contains that is not included in [upstream](https://github.com/bytecodealliance/wasmtime):
+>
+> - `wasmtime_runtime::traphandlers::tls::PTR` is exported as public and can be directly accessed.
+>
+> Lunatic needs to preserve this thread local variable when moving between threads.
+
 <div align="center">
   <h1><code>wasmtime</code></h1>
 
