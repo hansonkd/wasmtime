@@ -646,7 +646,7 @@ pub mod tls {
 
 
     thread_local!(
-        /// This is set to pub so it can be preserved during a context swith on the same thread by AsyncWomrhole.
+        /// This is set to pub so it can be preserved during a context swith on the same thread by AsyncWormhole.
         pub static PTR: Cell<*const CallThreadState<'static>> = Cell::new(ptr::null())
     );
 
