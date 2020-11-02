@@ -1728,6 +1728,7 @@ pub(crate) fn emit(
             op,
             src: src_e,
             dst: reg_g,
+            srcloc,
         } => {
             let rex = RexFlags::clear_w();
             let (prefix, opcode, length) = match op {
@@ -1739,6 +1740,8 @@ pub(crate) fn emit(
                 SseOpcode::Andpd => (LegacyPrefixes::_66, 0x0F54, 2),
                 SseOpcode::Andnps => (LegacyPrefixes::None, 0x0F55, 2),
                 SseOpcode::Andnpd => (LegacyPrefixes::_66, 0x0F55, 2),
+                SseOpcode::Cvttps2dq => (LegacyPrefixes::_F3, 0x0F5B, 2),
+                SseOpcode::Cvtdq2ps => (LegacyPrefixes::None, 0x0F5B, 2),
                 SseOpcode::Divps => (LegacyPrefixes::None, 0x0F5E, 2),
                 SseOpcode::Divpd => (LegacyPrefixes::_66, 0x0F5E, 2),
                 SseOpcode::Divss => (LegacyPrefixes::_F3, 0x0F5E, 2),
@@ -1759,6 +1762,7 @@ pub(crate) fn emit(
                 SseOpcode::Mulsd => (LegacyPrefixes::_F2, 0x0F59, 2),
                 SseOpcode::Orpd => (LegacyPrefixes::_66, 0x0F56, 2),
                 SseOpcode::Orps => (LegacyPrefixes::None, 0x0F56, 2),
+                SseOpcode::Packsswb => (LegacyPrefixes::_66, 0x0F63, 2),
                 SseOpcode::Paddb => (LegacyPrefixes::_66, 0x0FFC, 2),
                 SseOpcode::Paddd => (LegacyPrefixes::_66, 0x0FFE, 2),
                 SseOpcode::Paddq => (LegacyPrefixes::_66, 0x0FD4, 2),
@@ -1819,6 +1823,10 @@ pub(crate) fn emit(
                     emit_std_reg_reg(sink, prefix, opcode, length, reg_g.to_reg(), *reg_e, rex);
                 }
                 RegMem::Mem { addr } => {
+                    if let Some(srcloc) = *srcloc {
+                        // Register the offset at which the actual load instruction starts.
+                        sink.add_trap(srcloc, TrapCode::HeapOutOfBounds);
+                    }
                     let addr = &addr.finalize(state);
                     emit_std_reg_mem(sink, prefix, opcode, length, reg_g.to_reg(), addr, rex);
                 }
@@ -1889,7 +1897,7 @@ pub(crate) fn emit(
             // and negative zero. These instructions merge the sign bits in that
             // case, and are no-ops otherwise.
             let op = if *is_min { or_op } else { and_op };
-            let inst = Inst::xmm_rm_r(op, RegMem::reg(*lhs), *rhs_dst);
+            let inst = Inst::xmm_rm_r(op, RegMem::reg(*lhs), *rhs_dst, None);
             inst.emit(sink, info, state);
 
             let inst = Inst::jmp_known(done);
@@ -1899,13 +1907,13 @@ pub(crate) fn emit(
             // read-only operand: perform an addition between the two operands, which has the
             // desired NaN propagation effects.
             sink.bind_label(propagate_nan);
-            let inst = Inst::xmm_rm_r(add_op, RegMem::reg(*lhs), *rhs_dst);
+            let inst = Inst::xmm_rm_r(add_op, RegMem::reg(*lhs), *rhs_dst, None);
             inst.emit(sink, info, state);
 
             one_way_jmp(sink, CC::P, done);
 
             sink.bind_label(do_min_max);
-            let inst = Inst::xmm_rm_r(min_max_op, RegMem::reg(*lhs), *rhs_dst);
+            let inst = Inst::xmm_rm_r(min_max_op, RegMem::reg(*lhs), *rhs_dst, None);
             inst.emit(sink, info, state);
 
             sink.bind_label(done);
@@ -1916,7 +1924,8 @@ pub(crate) fn emit(
             src,
             dst,
             imm,
-            is64: w,
+            is64,
+            srcloc,
         } => {
             let (prefix, opcode, len) = match op {
                 SseOpcode::Cmpps => (LegacyPrefixes::None, 0x0FC2, 2),
@@ -1933,7 +1942,7 @@ pub(crate) fn emit(
                 SseOpcode::Pshufd => (LegacyPrefixes::_66, 0x0F70, 2),
                 _ => unimplemented!("Opcode {:?} not implemented", op),
             };
-            let rex = if *w {
+            let rex = if *is64 {
                 RexFlags::set_w()
             } else {
                 RexFlags::clear_w()
@@ -1955,6 +1964,10 @@ pub(crate) fn emit(
                     }
                 }
                 RegMem::Mem { addr } => {
+                    if let Some(srcloc) = *srcloc {
+                        // Register the offset at which the actual load instruction starts.
+                        sink.add_trap(srcloc, TrapCode::HeapOutOfBounds);
+                    }
                     let addr = &addr.finalize(state);
                     assert!(
                         !regs_swapped,
@@ -1963,7 +1976,7 @@ pub(crate) fn emit(
                     emit_std_reg_mem(sink, prefix, opcode, len, dst.to_reg(), addr, rex);
                 }
             }
-            sink.put1(*imm)
+            sink.put1(*imm);
         }
 
         Inst::XmmLoadConstSeq { val, dst, ty } => {
@@ -2028,11 +2041,14 @@ pub(crate) fn emit(
             dst_size,
         } => {
             let (prefix, opcode, dst_first) = match op {
+                SseOpcode::Cvttss2si => (LegacyPrefixes::_F3, 0x0F2C, true),
+                SseOpcode::Cvttsd2si => (LegacyPrefixes::_F2, 0x0F2C, true),
                 // Movd and movq use the same opcode; the presence of the REX prefix (set below)
                 // actually determines which is used.
                 SseOpcode::Movd | SseOpcode::Movq => (LegacyPrefixes::_66, 0x0F7E, false),
-                SseOpcode::Cvttss2si => (LegacyPrefixes::_F3, 0x0F2C, true),
-                SseOpcode::Cvttsd2si => (LegacyPrefixes::_F2, 0x0F2C, true),
+                SseOpcode::Movmskps => (LegacyPrefixes::None, 0x0F50, true),
+                SseOpcode::Movmskpd => (LegacyPrefixes::_66, 0x0F50, true),
+                SseOpcode::Pmovmskb => (LegacyPrefixes::_66, 0x0FD7, true),
                 _ => panic!("unexpected opcode {:?}", op),
             };
             let rex = match dst_size {
@@ -2188,7 +2204,7 @@ pub(crate) fn emit(
             } else {
                 SseOpcode::Addss
             };
-            let inst = Inst::xmm_rm_r(add_op, RegMem::reg(dst.to_reg()), *dst);
+            let inst = Inst::xmm_rm_r(add_op, RegMem::reg(dst.to_reg()), *dst, None);
             inst.emit(sink, info, state);
 
             sink.bind_label(done);
@@ -2295,8 +2311,12 @@ pub(crate) fn emit(
                 // If the input was positive, saturate to INT_MAX.
 
                 // Zero out tmp_xmm.
-                let inst =
-                    Inst::xmm_rm_r(SseOpcode::Xorpd, RegMem::reg(tmp_xmm.to_reg()), *tmp_xmm);
+                let inst = Inst::xmm_rm_r(
+                    SseOpcode::Xorpd,
+                    RegMem::reg(tmp_xmm.to_reg()),
+                    *tmp_xmm,
+                    None,
+                );
                 inst.emit(sink, info, state);
 
                 let inst = Inst::xmm_cmp_rm_r(cmp_op, RegMem::reg(src), tmp_xmm.to_reg());
@@ -2367,8 +2387,12 @@ pub(crate) fn emit(
                 sink.bind_label(check_positive);
 
                 // Zero out the tmp_xmm register.
-                let inst =
-                    Inst::xmm_rm_r(SseOpcode::Xorpd, RegMem::reg(tmp_xmm.to_reg()), *tmp_xmm);
+                let inst = Inst::xmm_rm_r(
+                    SseOpcode::Xorpd,
+                    RegMem::reg(tmp_xmm.to_reg()),
+                    *tmp_xmm,
+                    None,
+                );
                 inst.emit(sink, info, state);
 
                 let inst = Inst::xmm_cmp_rm_r(cmp_op, RegMem::reg(src), tmp_xmm.to_reg());
@@ -2522,7 +2546,7 @@ pub(crate) fn emit(
 
             sink.bind_label(handle_large);
 
-            let inst = Inst::xmm_rm_r(sub_op, RegMem::reg(tmp_xmm.to_reg()), *src);
+            let inst = Inst::xmm_rm_r(sub_op, RegMem::reg(tmp_xmm.to_reg()), *src, None);
             inst.emit(sink, info, state);
 
             let inst = Inst::xmm_to_gpr(trunc_op, src.to_reg(), *dst, *dst_size);

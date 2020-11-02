@@ -364,12 +364,14 @@ pub enum SseOpcode {
     Cmppd,
     Cmpss,
     Cmpsd,
+    Cvtdq2ps,
     Cvtsd2ss,
     Cvtsd2si,
     Cvtsi2ss,
     Cvtsi2sd,
     Cvtss2si,
     Cvtss2sd,
+    Cvttps2dq,
     Cvttss2si,
     Cvttsd2si,
     Divps,
@@ -391,6 +393,8 @@ pub enum SseOpcode {
     Movdqa,
     Movdqu,
     Movlhps,
+    Movmskps,
+    Movmskpd,
     Movq,
     Movss,
     Movsd,
@@ -405,6 +409,7 @@ pub enum SseOpcode {
     Pabsb,
     Pabsw,
     Pabsd,
+    Packsswb,
     Paddb,
     Paddd,
     Paddq,
@@ -443,6 +448,7 @@ pub enum SseOpcode {
     Pminub,
     Pminuw,
     Pminud,
+    Pmovmskb,
     Pmulld,
     Pmullw,
     Pmuludq,
@@ -508,6 +514,7 @@ impl SseOpcode {
             | SseOpcode::Minss
             | SseOpcode::Movaps
             | SseOpcode::Movlhps
+            | SseOpcode::Movmskps
             | SseOpcode::Movss
             | SseOpcode::Movups
             | SseOpcode::Mulps
@@ -529,10 +536,12 @@ impl SseOpcode {
             | SseOpcode::Cmppd
             | SseOpcode::Cmpsd
             | SseOpcode::Comisd
+            | SseOpcode::Cvtdq2ps
             | SseOpcode::Cvtsd2ss
             | SseOpcode::Cvtsd2si
             | SseOpcode::Cvtsi2sd
             | SseOpcode::Cvtss2sd
+            | SseOpcode::Cvttps2dq
             | SseOpcode::Cvttsd2si
             | SseOpcode::Divpd
             | SseOpcode::Divsd
@@ -542,6 +551,7 @@ impl SseOpcode {
             | SseOpcode::Minsd
             | SseOpcode::Movapd
             | SseOpcode::Movd
+            | SseOpcode::Movmskpd
             | SseOpcode::Movq
             | SseOpcode::Movsd
             | SseOpcode::Movupd
@@ -550,6 +560,7 @@ impl SseOpcode {
             | SseOpcode::Mulpd
             | SseOpcode::Mulsd
             | SseOpcode::Orpd
+            | SseOpcode::Packsswb
             | SseOpcode::Paddb
             | SseOpcode::Paddd
             | SseOpcode::Paddq
@@ -574,6 +585,7 @@ impl SseOpcode {
             | SseOpcode::Pmaxub
             | SseOpcode::Pminsw
             | SseOpcode::Pminub
+            | SseOpcode::Pmovmskb
             | SseOpcode::Pmullw
             | SseOpcode::Pmuludq
             | SseOpcode::Por
@@ -653,12 +665,14 @@ impl fmt::Debug for SseOpcode {
             SseOpcode::Cmpsd => "cmpsd",
             SseOpcode::Comiss => "comiss",
             SseOpcode::Comisd => "comisd",
+            SseOpcode::Cvtdq2ps => "cvtdq2ps",
             SseOpcode::Cvtsd2ss => "cvtsd2ss",
             SseOpcode::Cvtsd2si => "cvtsd2si",
             SseOpcode::Cvtsi2ss => "cvtsi2ss",
             SseOpcode::Cvtsi2sd => "cvtsi2sd",
             SseOpcode::Cvtss2si => "cvtss2si",
             SseOpcode::Cvtss2sd => "cvtss2sd",
+            SseOpcode::Cvttps2dq => "cvttps2dq",
             SseOpcode::Cvttss2si => "cvttss2si",
             SseOpcode::Cvttsd2si => "cvttsd2si",
             SseOpcode::Divps => "divps",
@@ -680,6 +694,8 @@ impl fmt::Debug for SseOpcode {
             SseOpcode::Movdqa => "movdqa",
             SseOpcode::Movdqu => "movdqu",
             SseOpcode::Movlhps => "movlhps",
+            SseOpcode::Movmskps => "movmskps",
+            SseOpcode::Movmskpd => "movmskpd",
             SseOpcode::Movq => "movq",
             SseOpcode::Movss => "movss",
             SseOpcode::Movsd => "movsd",
@@ -694,6 +710,7 @@ impl fmt::Debug for SseOpcode {
             SseOpcode::Pabsb => "pabsb",
             SseOpcode::Pabsw => "pabsw",
             SseOpcode::Pabsd => "pabsd",
+            SseOpcode::Packsswb => "packsswb",
             SseOpcode::Paddb => "paddb",
             SseOpcode::Paddd => "paddd",
             SseOpcode::Paddq => "paddq",
@@ -732,6 +749,7 @@ impl fmt::Debug for SseOpcode {
             SseOpcode::Pminub => "pminub",
             SseOpcode::Pminuw => "pminuw",
             SseOpcode::Pminud => "pminud",
+            SseOpcode::Pmovmskb => "pmovmskb",
             SseOpcode::Pmulld => "pmulld",
             SseOpcode::Pmullw => "pmullw",
             SseOpcode::Pmuludq => "pmuludq",

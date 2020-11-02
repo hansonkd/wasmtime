@@ -18,6 +18,7 @@ use regalloc::{RegUsageCollector, RegUsageMapper};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::convert::TryFrom;
 use smallvec::{smallvec, SmallVec};
 use std::string::{String, ToString};
 
@@ -29,6 +30,7 @@ pub mod args;
 pub use self::args::*;
 pub mod emit;
 pub use self::emit::*;
+pub mod unwind;
 
 #[cfg(test)]
 mod emit_tests;
@@ -287,6 +289,8 @@ pub enum VecALUOp {
     Addp,
     /// Unsigned multiply add long
     Umlal,
+    /// Zip vectors (primary) [meaning, high halves]
+    Zip1,
 }
 
 /// A Vector miscellaneous operation with two registers.
@@ -316,6 +320,14 @@ pub enum VecMisc2 {
     Scvtf,
     /// Unsigned integer convert to floating-point
     Ucvtf,
+    /// Floating point round to integral, rounding towards nearest
+    Frintn,
+    /// Floating point round to integral, rounding towards zero
+    Frintz,
+    /// Floating point round to integral, rounding towards minus infinity
+    Frintm,
+    /// Floating point round to integral, rounding towards plus infinity
+    Frintp,
 }
 
 /// A Vector narrowing operation with two registers.
@@ -332,8 +344,21 @@ pub enum VecMiscNarrowOp {
 /// An operation across the lanes of vectors.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecLanesOp {
+    /// Integer addition across a vector
+    Addv,
     /// Unsigned minimum across a vector
     Uminv,
+}
+
+/// A shift-by-immediate operation on each lane of a vector.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VecShiftImmOp {
+    // Unsigned shift left
+    Shl,
+    // Unsigned shift right
+    Ushr,
+    // Signed shift right
+    Sshr,
 }
 
 /// An operation on the bits of a register. This can be paired with several instruction formats
@@ -802,14 +827,9 @@ pub enum Inst {
         srcloc: Option<SourceLoc>,
     },
 
-    LoadFpuConst32 {
-        rd: Writable<Reg>,
-        const_data: f32,
-    },
-
     LoadFpuConst64 {
         rd: Writable<Reg>,
-        const_data: f64,
+        const_data: u64,
     },
 
     LoadFpuConst128 {
@@ -898,6 +918,14 @@ pub enum Inst {
         size: VectorSize,
     },
 
+    /// Duplicate immediate to vector.
+    VecDupImm {
+        rd: Writable<Reg>,
+        imm: ASIMDMovModImm,
+        invert: bool,
+        size: VectorSize,
+    },
+
     /// Vector extend.
     VecExtend {
         t: VecExtendOp,
@@ -910,8 +938,8 @@ pub enum Inst {
     VecMovElement {
         rd: Writable<Reg>,
         rn: Reg,
-        idx1: u8,
-        idx2: u8,
+        dest_idx: u8,
+        src_idx: u8,
         size: VectorSize,
     },
 
@@ -949,6 +977,28 @@ pub enum Inst {
         size: VectorSize,
     },
 
+    /// Vector shift by immediate: Shift Left (immediate), Unsigned Shift Right (immediate),
+    /// Signed Shift Right (immediate).  These are somewhat unusual in that, for right shifts,
+    /// the allowed range of `imm` values is 1 to lane-size-in-bits, inclusive.  A zero
+    /// right-shift cannot be encoded.  Left shifts are "normal", though, having valid `imm`
+    /// values from 0 to lane-size-in-bits - 1 inclusive.
+    VecShiftImm {
+        op: VecShiftImmOp,
+        rd: Writable<Reg>,
+        rn: Reg,
+        size: VectorSize,
+        imm: u8,
+    },
+
+    /// Vector extract - create a new vector, being the concatenation of the lowest `imm4` bytes
+    /// of `rm` followed by the uppermost `16 - imm4` bytes of `rn`.
+    VecExtract {
+        rd: Writable<Reg>,
+        rn: Reg,
+        rm: Reg,
+        imm4: u8,
+    },
+
     /// Table vector lookup - single register table. The table consists of 8-bit elements and is
     /// stored in `rn`, while `rm` contains 8-bit element indices. `is_extension` specifies whether
     /// to emit a TBX or a TBL instruction, i.e. whether to leave the elements in the destination
@@ -973,6 +1023,14 @@ pub enum Inst {
         rn2: Reg,
         rm: Reg,
         is_extension: bool,
+    },
+
+    /// Load an element and replicate to all lanes of a vector.
+    VecLoadReplicate {
+        rd: Writable<Reg>,
+        rn: Reg,
+        size: VectorSize,
+        srcloc: Option<SourceLoc>,
     },
 
     /// Move to the NZCV flags (actually a `MSR NZCV, Xn` insn).
@@ -1243,29 +1301,146 @@ impl Inst {
         }
     }
 
-    /// Create an instruction that loads a 32-bit floating-point constant.
-    pub fn load_fp_constant32(rd: Writable<Reg>, value: f32) -> Inst {
-        // TODO: use FMOV immediate form when `value` has sufficiently few mantissa/exponent bits.
-        Inst::LoadFpuConst32 {
-            rd,
-            const_data: value,
+    /// Create instructions that load a 32-bit floating-point constant.
+    pub fn load_fp_constant32<F: FnMut(RegClass, Type) -> Writable<Reg>>(
+        rd: Writable<Reg>,
+        value: u32,
+        mut alloc_tmp: F,
+    ) -> SmallVec<[Inst; 4]> {
+        if value == 0 {
+            smallvec![Inst::VecDupImm {
+                rd,
+                imm: ASIMDMovModImm::zero(),
+                invert: false,
+                size: VectorSize::Size8x8
+            }]
+        } else {
+            // TODO: use FMOV immediate form when `value` has sufficiently few mantissa/exponent bits.
+            let tmp = alloc_tmp(RegClass::I64, I32);
+            let mut insts = Inst::load_constant(tmp, value as u64);
+
+            insts.push(Inst::MovToFpu {
+                rd,
+                rn: tmp.to_reg(),
+            });
+
+            insts
         }
     }
 
-    /// Create an instruction that loads a 64-bit floating-point constant.
-    pub fn load_fp_constant64(rd: Writable<Reg>, value: f64) -> Inst {
-        // TODO: use FMOV immediate form when `value` has sufficiently few mantissa/exponent bits.
-        Inst::LoadFpuConst64 {
-            rd,
-            const_data: value,
+    /// Create instructions that load a 64-bit floating-point constant.
+    pub fn load_fp_constant64<F: FnMut(RegClass, Type) -> Writable<Reg>>(
+        rd: Writable<Reg>,
+        const_data: u64,
+        mut alloc_tmp: F,
+    ) -> SmallVec<[Inst; 4]> {
+        if let Ok(const_data) = u32::try_from(const_data) {
+            Inst::load_fp_constant32(rd, const_data, alloc_tmp)
+        // TODO: use FMOV immediate form when `const_data` has sufficiently few mantissa/exponent bits.
+        // Also, treat it as half of a 128-bit vector and consider replicated patterns. Scalar MOVI
+        // might also be an option.
+        } else if const_data & (u32::MAX as u64) == 0 {
+            let tmp = alloc_tmp(RegClass::I64, I64);
+            let mut insts = Inst::load_constant(tmp, const_data);
+
+            insts.push(Inst::MovToFpu {
+                rd,
+                rn: tmp.to_reg(),
+            });
+
+            insts
+        } else {
+            smallvec![Inst::LoadFpuConst64 { rd, const_data }]
         }
     }
 
-    /// Create an instruction that loads a 128-bit vector constant.
-    pub fn load_fp_constant128(rd: Writable<Reg>, value: u128) -> Inst {
-        Inst::LoadFpuConst128 {
-            rd,
-            const_data: value,
+    /// Create instructions that load a 128-bit vector constant.
+    pub fn load_fp_constant128<F: FnMut(RegClass, Type) -> Writable<Reg>>(
+        rd: Writable<Reg>,
+        const_data: u128,
+        alloc_tmp: F,
+    ) -> SmallVec<[Inst; 5]> {
+        if let Ok(const_data) = u64::try_from(const_data) {
+            SmallVec::from(&Inst::load_fp_constant64(rd, const_data, alloc_tmp)[..])
+        } else if let Some((pattern, size)) =
+            Inst::get_replicated_vector_pattern(const_data, ScalarSize::Size64)
+        {
+            Inst::load_replicated_vector_pattern(
+                rd,
+                pattern,
+                VectorSize::from_lane_size(size, true),
+                alloc_tmp,
+            )
+        } else {
+            smallvec![Inst::LoadFpuConst128 { rd, const_data }]
+        }
+    }
+
+    /// Determine whether a 128-bit constant represents a vector consisting of elements with
+    /// the same value.
+    pub fn get_replicated_vector_pattern(
+        value: u128,
+        size: ScalarSize,
+    ) -> Option<(u64, ScalarSize)> {
+        let (mask, shift, next_size) = match size {
+            ScalarSize::Size8 => (u8::MAX as u128, 8, ScalarSize::Size128),
+            ScalarSize::Size16 => (u16::MAX as u128, 16, ScalarSize::Size8),
+            ScalarSize::Size32 => (u32::MAX as u128, 32, ScalarSize::Size16),
+            ScalarSize::Size64 => (u64::MAX as u128, 64, ScalarSize::Size32),
+            _ => return None,
+        };
+        let mut r = None;
+        let v = value & mask;
+
+        if (value >> shift) & mask == v {
+            r = Inst::get_replicated_vector_pattern(v, next_size);
+
+            if r.is_none() {
+                r = Some((v as u64, size));
+            }
+        }
+
+        r
+    }
+
+    /// Create instructions that load a 128-bit vector constant consisting of elements with
+    /// the same value.
+    pub fn load_replicated_vector_pattern<F: FnMut(RegClass, Type) -> Writable<Reg>>(
+        rd: Writable<Reg>,
+        pattern: u64,
+        size: VectorSize,
+        mut alloc_tmp: F,
+    ) -> SmallVec<[Inst; 5]> {
+        let lane_size = size.lane_size();
+
+        if let Some(imm) = ASIMDMovModImm::maybe_from_u64(pattern, lane_size) {
+            smallvec![Inst::VecDupImm {
+                rd,
+                imm,
+                invert: false,
+                size
+            }]
+        } else if let Some(imm) = ASIMDMovModImm::maybe_from_u64(!pattern, lane_size) {
+            debug_assert_ne!(lane_size, ScalarSize::Size8);
+            debug_assert_ne!(lane_size, ScalarSize::Size64);
+
+            smallvec![Inst::VecDupImm {
+                rd,
+                imm,
+                invert: true,
+                size
+            }]
+        } else {
+            let tmp = alloc_tmp(RegClass::I64, I64);
+            let mut insts = SmallVec::from(&Inst::load_constant(tmp, pattern)[..]);
+
+            insts.push(Inst::VecDup {
+                rd,
+                rn: tmp.to_reg(),
+                size,
+            });
+
+            insts
         }
     }
 
@@ -1577,6 +1752,15 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
             collector.add_def(rd);
             collector.add_use(rn);
         }
+        &Inst::VecShiftImm { rd, rn, .. } => {
+            collector.add_def(rd);
+            collector.add_use(rn);
+        }
+        &Inst::VecExtract { rd, rn, rm, .. } => {
+            collector.add_def(rd);
+            collector.add_use(rn);
+            collector.add_use(rm);
+        }
         &Inst::VecTbl {
             rd,
             rn,
@@ -1609,7 +1793,10 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
                 collector.add_def(rd);
             }
         }
-
+        &Inst::VecLoadReplicate { rd, rn, .. } => {
+            collector.add_def(rd);
+            collector.add_use(rn);
+        }
         &Inst::FpuCmp32 { rn, rm } | &Inst::FpuCmp64 { rn, rm } => {
             collector.add_use(rn);
             collector.add_use(rm);
@@ -1638,9 +1825,7 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
             collector.add_use(rd);
             memarg_regs(mem, collector);
         }
-        &Inst::LoadFpuConst32 { rd, .. }
-        | &Inst::LoadFpuConst64 { rd, .. }
-        | &Inst::LoadFpuConst128 { rd, .. } => {
+        &Inst::LoadFpuConst64 { rd, .. } | &Inst::LoadFpuConst128 { rd, .. } => {
             collector.add_def(rd);
         }
         &Inst::FpuToInt { rd, rn, .. } => {
@@ -1679,6 +1864,9 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
         &Inst::VecDupFromFpu { rd, rn, .. } => {
             collector.add_def(rd);
             collector.add_use(rn);
+        }
+        &Inst::VecDupImm { rd, .. } => {
+            collector.add_def(rd);
         }
         &Inst::VecExtend { rd, rn, .. } => {
             collector.add_def(rd);
@@ -1762,8 +1950,9 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
         &Inst::LoadExtName { rd, .. } => {
             collector.add_def(rd);
         }
-        &Inst::LoadAddr { rd, mem: _ } => {
+        &Inst::LoadAddr { rd, ref mem } => {
             collector.add_def(rd);
+            memarg_regs(mem, collector);
         }
         &Inst::VirtualSPOffsetAdj { .. } => {}
         &Inst::EmitIsland { .. } => {}
@@ -2157,6 +2346,24 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
             map_def(mapper, rd);
             map_use(mapper, rn);
         }
+        &mut Inst::VecShiftImm {
+            ref mut rd,
+            ref mut rn,
+            ..
+        } => {
+            map_def(mapper, rd);
+            map_use(mapper, rn);
+        }
+        &mut Inst::VecExtract {
+            ref mut rd,
+            ref mut rn,
+            ref mut rm,
+            ..
+        } => {
+            map_def(mapper, rd);
+            map_use(mapper, rn);
+            map_use(mapper, rm);
+        }
         &mut Inst::VecTbl {
             ref mut rd,
             ref mut rn,
@@ -2188,6 +2395,14 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
             } else {
                 map_def(mapper, rd);
             }
+        }
+        &mut Inst::VecLoadReplicate {
+            ref mut rd,
+            ref mut rn,
+            ..
+        } => {
+            map_def(mapper, rd);
+            map_use(mapper, rn);
         }
         &mut Inst::FpuCmp32 {
             ref mut rn,
@@ -2250,9 +2465,6 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
         } => {
             map_use(mapper, rd);
             map_mem(mapper, mem);
-        }
-        &mut Inst::LoadFpuConst32 { ref mut rd, .. } => {
-            map_def(mapper, rd);
         }
         &mut Inst::LoadFpuConst64 { ref mut rd, .. } => {
             map_def(mapper, rd);
@@ -2347,6 +2559,9 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
         } => {
             map_def(mapper, rd);
             map_use(mapper, rn);
+        }
+        &mut Inst::VecDupImm { ref mut rd, .. } => {
+            map_def(mapper, rd);
         }
         &mut Inst::VecExtend {
             ref mut rd,
@@ -2538,19 +2753,12 @@ impl MachInst for Inst {
         to_reg: Writable<Reg>,
         value: u64,
         ty: Type,
-        _alloc_tmp: F,
+        alloc_tmp: F,
     ) -> SmallVec<[Inst; 4]> {
         if ty == F64 {
-            let mut ret = SmallVec::new();
-            ret.push(Inst::load_fp_constant64(to_reg, f64::from_bits(value)));
-            ret
+            Inst::load_fp_constant64(to_reg, value, alloc_tmp)
         } else if ty == F32 {
-            let mut ret = SmallVec::new();
-            ret.push(Inst::load_fp_constant32(
-                to_reg,
-                f32::from_bits(value as u32),
-            ));
-            ret
+            Inst::load_fp_constant32(to_reg, value as u32, alloc_tmp)
         } else {
             // Must be an integer type.
             debug_assert!(
@@ -3123,13 +3331,9 @@ impl Inst {
                 let mem = mem.show_rru(mb_rru);
                 format!("{}str {}, {}", mem_str, rd, mem)
             }
-            &Inst::LoadFpuConst32 { rd, const_data } => {
-                let rd = show_vreg_scalar(rd.to_reg(), mb_rru, ScalarSize::Size32);
-                format!("ldr {}, pc+8 ; b 8 ; data.f32 {}", rd, const_data)
-            }
             &Inst::LoadFpuConst64 { rd, const_data } => {
                 let rd = show_vreg_scalar(rd.to_reg(), mb_rru, ScalarSize::Size64);
-                format!("ldr {}, pc+8 ; b 12 ; data.f64 {}", rd, const_data)
+                format!("ldr {}, pc+8 ; b 12 ; data.f64 {}", rd, f64::from_bits(const_data))
             }
             &Inst::LoadFpuConst128 { rd, const_data } => {
                 let rd = show_vreg_scalar(rd.to_reg(), mb_rru, ScalarSize::Size128);
@@ -3237,6 +3441,17 @@ impl Inst {
                 let rn = show_vreg_element(rn, mb_rru, 0, size);
                 format!("dup {}, {}", rd, rn)
             }
+            &Inst::VecDupImm { rd, imm, invert, size } => {
+                let imm = imm.show_rru(mb_rru);
+                let op = if invert {
+                    "mvni"
+                } else {
+                    "movi"
+                };
+                let rd = show_vreg_vector(rd.to_reg(), mb_rru, size);
+
+                format!("{} {}, {}", op, rd, imm)
+            }
             &Inst::VecExtend { t, rd, rn, high_half } => {
                 let (op, dest, src) = match (t, high_half) {
                     (VecExtendOp::Sxtl8, false) => ("sxtl", VectorSize::Size16x8, VectorSize::Size8x8),
@@ -3259,12 +3474,12 @@ impl Inst {
             &Inst::VecMovElement {
                 rd,
                 rn,
-                idx1,
-                idx2,
+                dest_idx,
+                src_idx,
                 size,
             } => {
-                let rd = show_vreg_element(rd.to_reg(), mb_rru, idx1, size);
-                let rn = show_vreg_element(rn, mb_rru, idx2, size);
+                let rd = show_vreg_element(rd.to_reg(), mb_rru, dest_idx, size);
+                let rn = show_vreg_element(rn, mb_rru, src_idx, size);
                 format!("mov {}, {}", rd, rn)
             }
             &Inst::VecMiscNarrow { op, rd, rn, size, high_half } => {
@@ -3330,6 +3545,7 @@ impl Inst {
                     VecALUOp::Fmul => ("fmul", size),
                     VecALUOp::Addp => ("addp", size),
                     VecALUOp::Umlal => ("umlal", size),
+                    VecALUOp::Zip1 => ("zip1", size),
                 };
                 let rd_size = if alu_op == VecALUOp::Umlal {
                     size.widen()
@@ -3370,6 +3586,10 @@ impl Inst {
                     VecMisc2::Fcvtzu => ("fcvtzu", size),
                     VecMisc2::Scvtf => ("scvtf", size),
                     VecMisc2::Ucvtf => ("ucvtf", size),
+                    VecMisc2::Frintn => ("frintn", size),
+                    VecMisc2::Frintz => ("frintz", size),
+                    VecMisc2::Frintm => ("frintm", size),
+                    VecMisc2::Frintp => ("frintp", size),
                 };
 
                 let rd_size = if is_shll { size.widen() } else { size };
@@ -3381,10 +3601,27 @@ impl Inst {
             &Inst::VecLanes { op, rd, rn, size } => {
                 let op = match op {
                     VecLanesOp::Uminv => "uminv",
+                    VecLanesOp::Addv => "addv",
                 };
                 let rd = show_vreg_scalar(rd.to_reg(), mb_rru, size.lane_size());
                 let rn = show_vreg_vector(rn, mb_rru, size);
                 format!("{} {}, {}", op, rd, rn)
+            }
+            &Inst::VecShiftImm { op, rd, rn, size, imm } => {
+                let op = match op {
+                    VecShiftImmOp::Shl => "shl",
+                    VecShiftImmOp::Ushr => "ushr",
+                    VecShiftImmOp::Sshr => "sshr",
+                };
+                let rd = show_vreg_vector(rd.to_reg(), mb_rru, size);
+                let rn = show_vreg_vector(rn, mb_rru, size);
+                format!("{} {}, {}, #{}", op, rd, rn, imm)
+            }
+            &Inst::VecExtract { rd, rn, rm, imm4 } => {
+                let rd = show_vreg_vector(rd.to_reg(), mb_rru, VectorSize::Size8x16);
+                let rn = show_vreg_vector(rn, mb_rru, VectorSize::Size8x16);
+                let rm = show_vreg_vector(rm, mb_rru, VectorSize::Size8x16);
+                format!("ext {}, {}, {}, #{}", rd, rn, rm, imm4)
             }
             &Inst::VecTbl {
                 rd,
@@ -3411,6 +3648,12 @@ impl Inst {
                 let rn2 = show_vreg_vector(rn2, mb_rru, VectorSize::Size8x16);
                 let rm = show_vreg_vector(rm, mb_rru, VectorSize::Size8x16);
                 format!("{} {}, {{ {}, {} }}, {}", op, rd, rn, rn2, rm)
+            }
+            &Inst::VecLoadReplicate { rd, rn, size, .. } => {
+                let rd = show_vreg_vector(rd.to_reg(), mb_rru, size);
+                let rn = rn.show_rru(mb_rru);
+
+                format!("ld1r {{ {} }}, [{}]", rd, rn)
             }
             &Inst::MovToNZCV { rn } => {
                 let rn = rn.show_rru(mb_rru);

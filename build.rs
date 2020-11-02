@@ -182,6 +182,7 @@ fn experimental_x64_should_panic(testsuite: &str, testname: &str, strategy: &str
     match (testsuite, testname) {
         ("simd", "simd_address") => return false,
         ("simd", "simd_bitwise") => return false,
+        ("simd", "simd_boolean") => return false,
         ("simd", "simd_const") => return false,
         ("simd", "simd_i8x16_arith") => return false,
         ("simd", "simd_i8x16_arith2") => return false,
@@ -198,9 +199,11 @@ fn experimental_x64_should_panic(testsuite: &str, testname: &str, strategy: &str
         ("simd", "simd_f32x4") => return false,
         ("simd", "simd_f32x4_arith") => return false,
         ("simd", "simd_f32x4_cmp") => return false,
+        ("simd", "simd_f32x4_pmin_pmax") => return false,
         ("simd", "simd_f64x2") => return false,
         ("simd", "simd_f64x2_arith") => return false,
         ("simd", "simd_f64x2_cmp") => return false,
+        ("simd", "simd_f64x2_pmin_pmax") => return false,
         ("simd", "simd_lane") => return false,
         ("simd", "simd_load_splat") => return false,
         ("simd", "simd_store") => return false,
@@ -229,13 +232,21 @@ fn ignore(testsuite: &str, testname: &str, strategy: &str) -> bool {
                 return env::var("CARGO_CFG_TARGET_ARCH").unwrap() != "x86_64";
             }
 
-            // These tests have simd operators which aren't implemented yet.
-            ("simd", "simd_boolean") => return true,
-            ("simd", "simd_f32x4_pmin_pmax") => return true,
-            ("simd", "simd_f32x4_rounding") => return true,
-            ("simd", "simd_f64x2_pmin_pmax") => return true,
-            ("simd", "simd_f64x2_rounding") => return true,
+            // These are only implemented on aarch64 and x64.
+            ("simd", "simd_boolean")
+            | ("simd", "simd_f32x4_pmin_pmax")
+            | ("simd", "simd_f64x2_pmin_pmax") => {
+                return !(cfg!(feature = "experimental_x64")
+                    || env::var("CARGO_CFG_TARGET_ARCH").unwrap() == "aarch64")
+            }
 
+            // These are only implemented on aarch64.
+            ("simd", "simd_f32x4_rounding") | ("simd", "simd_f64x2_rounding") => {
+                return env::var("CARGO_CFG_TARGET_ARCH").unwrap() != "aarch64";
+            }
+
+            // These tests have simd operators which aren't implemented yet.
+            // (currently none)
             _ => {}
         },
         _ => panic!("unrecognized strategy"),
