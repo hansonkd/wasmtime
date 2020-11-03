@@ -413,6 +413,7 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-reader",
  "log",
+ "smallvec",
  "thiserror",
 ]
 
@@ -1884,9 +1885,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.4.1"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3757cb9d89161a2f24e1cf78efa0c1fcff485d18e3f55e0aa3480824ddaa0f3f"
+checksum = "fbee7696b84bbf3d89a1c2eccff0850e3047ed46bfcd2e92c29a2d074d57e252"
 
 [[package]]
 name = "souper-ir"
@@ -1905,9 +1906,9 @@ checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
 
 [[package]]
 name = "staticvec"
-version = "0.10.2"
+version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fbd8c65873d2e06991c33399d5e4bccba6ba04743fe99e9656afa0c64137d2c"
+checksum = "3c87f4be0fd89694157f3814ca88715ad8ba6010c453b1e89ca264aee04d70b9"
 
 [[package]]
 name = "strsim"
@@ -2791,9 +2792,9 @@ dependencies = [
 
 [[package]]
 name = "z3"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb8ef9d11f50b64327c8a5906b53d3f7f792cb0e849909d476ac0aa16117d61"
+checksum = "aa17be9852c6c2a8de2ea0875350dc5f8626f3eaa6b683148753b827f1b39ce5"
 dependencies = [
  "lazy_static",
  "log",
