@@ -90,6 +90,11 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         64
     }
 
+    /// Return required stack alignment in bytes.
+    fn stack_align(_call_conv: isa::CallConv) -> u32 {
+        16
+    }
+
     fn compute_arg_locs(
         call_conv: isa::CallConv,
         params: &[ir::AbiParam],
@@ -390,6 +395,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         _: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
         fixed_frame_storage_size: u32,
+        _outgoing_args_size: u32,
     ) -> (u64, SmallVec<[Self::I; 16]>) {
         let mut insts = SmallVec::new();
         // Find all clobbered registers that are callee-save. These are only I64
@@ -437,6 +443,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         call_conv: isa::CallConv,
         flags: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
+        _fixed_frame_storage_size: u32,
+        _outgoing_args_size: u32,
     ) -> SmallVec<[Self::I; 16]> {
         let mut insts = SmallVec::new();
 

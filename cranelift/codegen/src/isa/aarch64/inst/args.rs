@@ -579,6 +579,15 @@ impl ScalarSize {
         }
     }
 
+    /// Convert to an integer operand size.
+    pub fn operand_size(&self) -> OperandSize {
+        match self {
+            ScalarSize::Size32 => OperandSize::Size32,
+            ScalarSize::Size64 => OperandSize::Size64,
+            _ => panic!("Unexpected operand_size request for: {:?}", self),
+        }
+    }
+
     /// Convert from a type into the smallest size that fits.
     pub fn from_ty(ty: Type) -> ScalarSize {
         Self::from_bits(ty_bits(ty))
@@ -677,6 +686,9 @@ impl VectorSize {
         }
     }
 
+    /// Produces a `VectorSize` with lanes twice as wide.  Note that if the resulting
+    /// size would exceed 128 bits, then the number of lanes is also halved, so as to
+    /// ensure that the result size is at most 128 bits.
     pub fn widen(&self) -> VectorSize {
         match self {
             VectorSize::Size8x8 => VectorSize::Size16x8,
@@ -689,6 +701,7 @@ impl VectorSize {
         }
     }
 
+    /// Produces a `VectorSize` that has the same lane width, but half as many lanes.
     pub fn halve(&self) -> VectorSize {
         match self {
             VectorSize::Size8x16 => VectorSize::Size8x8,

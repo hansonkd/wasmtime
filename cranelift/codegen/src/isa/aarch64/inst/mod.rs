@@ -291,6 +291,10 @@ pub enum VecALUOp {
     Umlal,
     /// Zip vectors (primary) [meaning, high halves]
     Zip1,
+    /// Signed multiply long (low halves)
+    Smull,
+    /// Signed multiply long (high halves)
+    Smull2,
 }
 
 /// A Vector miscellaneous operation with two registers.
@@ -873,10 +877,13 @@ pub enum Inst {
         rn: Reg,
     },
 
-    /// Move from a GPR to a scalar FP register.
+    /// Move from a GPR to a vector register.  The scalar value is parked in the lowest lane
+    /// of the destination, and all other lanes are zeroed out.  Currently only 32- and 64-bit
+    /// transactions are supported.
     MovToFpu {
         rd: Writable<Reg>,
         rn: Reg,
+        size: ScalarSize,
     },
 
     /// Move to a vector element from a GPR.
@@ -1315,13 +1322,15 @@ impl Inst {
                 size: VectorSize::Size8x8
             }]
         } else {
-            // TODO: use FMOV immediate form when `value` has sufficiently few mantissa/exponent bits.
+            // TODO: use FMOV immediate form when `value` has sufficiently few mantissa/exponent
+            // bits.
             let tmp = alloc_tmp(RegClass::I64, I32);
             let mut insts = Inst::load_constant(tmp, value as u64);
 
             insts.push(Inst::MovToFpu {
                 rd,
                 rn: tmp.to_reg(),
+                size: ScalarSize::Size64,
             });
 
             insts
@@ -1336,9 +1345,9 @@ impl Inst {
     ) -> SmallVec<[Inst; 4]> {
         if let Ok(const_data) = u32::try_from(const_data) {
             Inst::load_fp_constant32(rd, const_data, alloc_tmp)
-        // TODO: use FMOV immediate form when `const_data` has sufficiently few mantissa/exponent bits.
-        // Also, treat it as half of a 128-bit vector and consider replicated patterns. Scalar MOVI
-        // might also be an option.
+        // TODO: use FMOV immediate form when `const_data` has sufficiently few mantissa/exponent
+        // bits.  Also, treat it as half of a 128-bit vector and consider replicated
+        // patterns. Scalar MOVI might also be an option.
         } else if const_data & (u32::MAX as u64) == 0 {
             let tmp = alloc_tmp(RegClass::I64, I64);
             let mut insts = Inst::load_constant(tmp, const_data);
@@ -1346,6 +1355,7 @@ impl Inst {
             insts.push(Inst::MovToFpu {
                 rd,
                 rn: tmp.to_reg(),
+                size: ScalarSize::Size64,
             });
 
             insts
@@ -1845,7 +1855,7 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
             collector.add_def(rd);
             collector.add_use(rn);
         }
-        &Inst::MovToFpu { rd, rn } => {
+        &Inst::MovToFpu { rd, rn, .. } => {
             collector.add_def(rd);
             collector.add_use(rn);
         }
@@ -2311,11 +2321,15 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
             map_use(mapper, rm);
         }
         &mut Inst::FpuRRI {
+            fpu_op,
             ref mut rd,
             ref mut rn,
             ..
         } => {
-            map_def(mapper, rd);
+            match fpu_op {
+                FPUOpRI::UShr32(..) | FPUOpRI::UShr64(..) => map_def(mapper, rd),
+                FPUOpRI::Sli32(..) | FPUOpRI::Sli64(..) => map_mod(mapper, rd),
+            }
             map_use(mapper, rn);
         }
         &mut Inst::FpuRRRR {
@@ -2519,6 +2533,7 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
         &mut Inst::MovToFpu {
             ref mut rd,
             ref mut rn,
+            ..
         } => {
             map_def(mapper, rd);
             map_use(mapper, rn);
@@ -3398,9 +3413,10 @@ impl Inst {
                 let rn = show_vreg_scalar(rn, mb_rru, size);
                 format!("{} {}, {}", inst, rd, rn)
             }
-            &Inst::MovToFpu { rd, rn } => {
-                let rd = show_vreg_scalar(rd.to_reg(), mb_rru, ScalarSize::Size64);
-                let rn = show_ireg_sized(rn, mb_rru, OperandSize::Size64);
+            &Inst::MovToFpu { rd, rn, size } => {
+                let operand_size = size.operand_size();
+                let rd = show_vreg_scalar(rd.to_reg(), mb_rru, size);
+                let rn = show_ireg_sized(rn, mb_rru, operand_size);
                 format!("fmov {}, {}", rd, rn)
             }
             &Inst::MovToVec { rd, rn, idx, size } => {
@@ -3546,15 +3562,21 @@ impl Inst {
                     VecALUOp::Addp => ("addp", size),
                     VecALUOp::Umlal => ("umlal", size),
                     VecALUOp::Zip1 => ("zip1", size),
+                    VecALUOp::Smull => ("smull", size),
+                    VecALUOp::Smull2 => ("smull2", size),
                 };
-                let rd_size = if alu_op == VecALUOp::Umlal {
-                    size.widen()
-                } else {
-                    size
+                let rd_size = match alu_op {
+                    VecALUOp::Umlal | VecALUOp::Smull | VecALUOp::Smull2 => size.widen(),
+                    _ => size
                 };
+                let rn_size = match alu_op {
+                    VecALUOp::Smull => size.halve(),
+                    _ => size
+                };
+                let rm_size = rn_size;
                 let rd = show_vreg_vector(rd.to_reg(), mb_rru, rd_size);
-                let rn = show_vreg_vector(rn, mb_rru, size);
-                let rm = show_vreg_vector(rm, mb_rru, size);
+                let rn = show_vreg_vector(rn, mb_rru, rn_size);
+                let rm = show_vreg_vector(rm, mb_rru, rm_size);
                 format!("{} {}, {}, {}", op, rd, rn, rm)
             }
             &Inst::VecMisc { op, rd, rn, size } => {

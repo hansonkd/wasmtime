@@ -152,6 +152,11 @@ impl ABIMachineSpec for AArch64MachineDeps {
         64
     }
 
+    /// Return required stack alignment in bytes.
+    fn stack_align(_call_conv: isa::CallConv) -> u32 {
+        16
+    }
+
     fn compute_arg_locs(
         call_conv: isa::CallConv,
         params: &[ir::AbiParam],
@@ -508,6 +513,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
         _: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
         fixed_frame_storage_size: u32,
+        _outgoing_args_size: u32,
     ) -> (u64, SmallVec<[Inst; 16]>) {
         let mut insts = SmallVec::new();
         let (clobbered_int, clobbered_vec) = get_regs_saved_in_prologue(call_conv, clobbers);
@@ -559,6 +565,8 @@ impl ABIMachineSpec for AArch64MachineDeps {
         call_conv: isa::CallConv,
         flags: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
+        _fixed_frame_storage_size: u32,
+        _outgoing_args_size: u32,
     ) -> SmallVec<[Inst; 16]> {
         let mut insts = SmallVec::new();
         let (clobbered_int, clobbered_vec) = get_regs_saved_in_prologue(call_conv, clobbers);
