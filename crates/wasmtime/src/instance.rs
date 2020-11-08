@@ -3,7 +3,7 @@ use crate::{Engine, Export, Extern, Func, Global, Memory, Module, Store, Table, 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use std::any::Any;
 use std::mem;
-use wasmtime_environ::EntityIndex;
+use wasmtime_environ::wasm::EntityIndex;
 use wasmtime_jit::CompiledModule;
 use wasmtime_runtime::{
     Imports, InstantiationError, StackMapRegistry, VMContext, VMExternRefActivationsTable,
@@ -98,7 +98,11 @@ fn instantiate(
 #[derive(Clone)]
 pub struct Instance {
     pub(crate) handle: StoreInstanceHandle,
-    store: Store,
+    // Note that this is required to keep the module's code memory alive while
+    // we have a handle to this `Instance`. We may eventually want to shrink
+    // this to only hold onto the bare minimum each instance needs to allow
+    // deallocating some `Module` resources early, but until then we just hold
+    // on to everything.
     module: Module,
 }
 
@@ -170,7 +174,6 @@ impl Instance {
 
         Ok(Instance {
             handle,
-            store: store.clone(),
             module: module.clone(),
         })
     }
@@ -180,7 +183,7 @@ impl Instance {
     /// This is the [`Store`] that generally serves as a sort of global cache
     /// for various instance-related things.
     pub fn store(&self) -> &Store {
-        &self.store
+        &self.handle.store
     }
 
     /// Returns the list of exported items from this [`Instance`].
@@ -300,6 +303,10 @@ fn with_imports<R>(
                 }
                 functions.push(func.vmimport());
             }
+
+            // FIXME(#2094)
+            EntityIndex::Module(_i) => unimplemented!(),
+            EntityIndex::Instance(_i) => unimplemented!(),
         }
         Ok(())
     };

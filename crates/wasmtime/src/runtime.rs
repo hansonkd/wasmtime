@@ -12,7 +12,6 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use target_lexicon::Triple;
 use wasmparser::WasmFeatures;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
@@ -85,7 +84,12 @@ impl Config {
             profiler: Arc::new(NullProfilerAgent),
             memory_creator: None,
             max_wasm_stack: 1 << 20,
-            features: WasmFeatures::default(),
+            features: WasmFeatures {
+                reference_types: true,
+                bulk_memory: true,
+                multi_value: true,
+                ..WasmFeatures::default()
+            },
         }
     }
 
@@ -254,6 +258,20 @@ impl Config {
     /// [proposal]: https://github.com/webassembly/multi-memory
     pub fn wasm_multi_memory(&mut self, enable: bool) -> &mut Self {
         self.features.multi_memory = enable;
+        self
+    }
+
+    /// Configures whether the WebAssembly module linking [proposal] will
+    /// be enabled for compilation.
+    ///
+    /// Note that development of this feature is still underway, so enabling
+    /// this is likely to be full of bugs.
+    ///
+    /// This is `false` by default.
+    ///
+    /// [proposal]: https://github.com/webassembly/module-linking
+    pub fn wasm_module_linking(&mut self, enable: bool) -> &mut Self {
+        self.features.module_linking = enable;
         self
     }
 
@@ -616,22 +634,6 @@ impl Config {
         let isa = self.target_isa();
         Compiler::new(isa, self.strategy, self.tunables.clone(), self.features)
     }
-
-    /// Hashes/fingerprints compiler setting to ensure that compatible
-    /// compilation artifacts are used.
-    pub(crate) fn compiler_fingerprint<H>(&self, state: &mut H)
-    where
-        H: Hasher,
-    {
-        self.flags.hash(state);
-        self.tunables.hash(state);
-
-        let triple = Triple::host();
-        triple.hash(state);
-
-        // Catch accidental bugs of reusing across wasmtime versions.
-        env!("CARGO_PKG_VERSION").hash(state);
-    }
 }
 
 fn round_up_to_pages(val: u64) -> u64 {
@@ -658,6 +660,7 @@ impl fmt::Debug for Config {
             .field("wasm_bulk_memory", &self.features.bulk_memory)
             .field("wasm_simd", &self.features.simd)
             .field("wasm_multi_value", &self.features.multi_value)
+            .field("wasm_module_linking", &self.features.module_linking)
             .field(
                 "flags",
                 &settings::Flags::new(self.flags.clone()).to_string(),

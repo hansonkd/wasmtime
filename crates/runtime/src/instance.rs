@@ -28,10 +28,10 @@ use thiserror::Error;
 use wasmtime_environ::entity::{packed_option::ReservedValue, BoxedSlice, EntityRef, PrimaryMap};
 use wasmtime_environ::wasm::{
     DataIndex, DefinedFuncIndex, DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex,
-    ElemIndex, FuncIndex, GlobalIndex, GlobalInit, MemoryIndex, SignatureIndex, TableElementType,
-    TableIndex, WasmType,
+    ElemIndex, EntityIndex, FuncIndex, GlobalIndex, GlobalInit, MemoryIndex, SignatureIndex,
+    TableElementType, TableIndex, WasmType,
 };
-use wasmtime_environ::{ir, DataInitializer, EntityIndex, Module, TableElements, VMOffsets};
+use wasmtime_environ::{ir, DataInitializer, Module, TableElements, VMOffsets};
 
 /// A WebAssembly instance.
 ///
@@ -40,9 +40,6 @@ use wasmtime_environ::{ir, DataInitializer, EntityIndex, Module, TableElements, 
 pub(crate) struct Instance {
     /// The `Module` this `Instance` was instantiated from.
     module: Arc<Module>,
-
-    /// The module's JIT code (if exists).
-    code: Arc<dyn Any>,
 
     /// Offsets in the `vmctx` region.
     offsets: VMOffsets,
@@ -325,6 +322,10 @@ impl Instance {
                 global: self.module.globals[*index],
             }
             .into(),
+
+            // FIXME(#2094)
+            EntityIndex::Instance(_index) => unimplemented!(),
+            EntityIndex::Module(_index) => unimplemented!(),
         }
     }
 
@@ -810,7 +811,6 @@ impl InstanceHandle {
     /// instance.
     pub unsafe fn new(
         module: Arc<Module>,
-        code: Arc<dyn Any>,
         finished_functions: &PrimaryMap<DefinedFuncIndex, *mut [VMFunctionBody]>,
         imports: Imports,
         mem_creator: Option<&dyn RuntimeMemoryCreator>,
@@ -847,7 +847,6 @@ impl InstanceHandle {
         let handle = {
             let instance = Instance {
                 module,
-                code,
                 offsets,
                 memories,
                 tables,
