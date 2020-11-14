@@ -5,8 +5,9 @@
 
 use crate::binemit::CodeOffset;
 use crate::ir::types::{
-    B1, B16, B16X8, B32, B32X4, B64, B64X2, B8, B8X16, F32, F32X4, F64, F64X2, FFLAGS, I16, I16X8,
-    I32, I32X4, I64, I64X2, I8, I8X16, IFLAGS, R32, R64,
+    B1, B16, B16X4, B16X8, B32, B32X2, B32X4, B64, B64X2, B8, B8X16, B8X8, F32, F32X2, F32X4, F64,
+    F64X2, FFLAGS, I16, I16X4, I16X8, I32, I32X2, I32X4, I64, I64X2, I8, I8X16, I8X8, IFLAGS, R32,
+    R64,
 };
 use crate::ir::{ExternalName, Opcode, SourceLoc, TrapCode, Type};
 use crate::isa::CallConv;
@@ -420,7 +421,6 @@ pub struct CallInfo {
     pub dest: ExternalName,
     pub uses: Vec<Reg>,
     pub defs: Vec<Writable<Reg>>,
-    pub loc: SourceLoc,
     pub opcode: Opcode,
     pub caller_callconv: CallConv,
     pub callee_callconv: CallConv,
@@ -433,7 +433,6 @@ pub struct CallIndInfo {
     pub rn: Reg,
     pub uses: Vec<Reg>,
     pub defs: Vec<Writable<Reg>>,
-    pub loc: SourceLoc,
     pub opcode: Opcode,
     pub caller_callconv: CallConv,
     pub callee_callconv: CallConv,
@@ -524,68 +523,57 @@ pub enum Inst {
     ULoad8 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// A signed (sign-extending) 8-bit load.
     SLoad8 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// An unsigned (zero-extending) 16-bit load.
     ULoad16 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// A signed (sign-extending) 16-bit load.
     SLoad16 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// An unsigned (zero-extending) 32-bit load.
     ULoad32 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// A signed (sign-extending) 32-bit load.
     SLoad32 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// A 64-bit load.
     ULoad64 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
 
     /// An 8-bit store.
     Store8 {
         rd: Reg,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// A 16-bit store.
     Store16 {
         rd: Reg,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// A 32-bit store.
     Store32 {
         rd: Reg,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// A 64-bit store.
     Store64 {
         rd: Reg,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
 
     /// A store of a pair of registers.
@@ -686,7 +674,6 @@ pub enum Inst {
     AtomicRMW {
         ty: Type, // I8, I16, I32 or I64
         op: inst_common::AtomicRmwOp,
-        srcloc: Option<SourceLoc>,
     },
 
     /// Similar to AtomicRMW, a compare-and-swap operation implemented using a load-linked
@@ -703,7 +690,6 @@ pub enum Inst {
     /// x24   (wr) scratch reg; value afterwards has no meaning
     AtomicCAS {
         ty: Type, // I8, I16, I32 or I64
-        srcloc: Option<SourceLoc>,
     },
 
     /// Read `ty` bits from address `r_addr`, zero extend the loaded value to 64 bits and put it
@@ -713,7 +699,6 @@ pub enum Inst {
         ty: Type, // I8, I16, I32 or I64
         r_data: Writable<Reg>,
         r_addr: Reg,
-        srcloc: Option<SourceLoc>,
     },
 
     /// Write the lowest `ty` bits of `r_data` to address `r_addr`, with a memory fence
@@ -723,7 +708,6 @@ pub enum Inst {
         ty: Type, // I8, I16, I32 or I64
         r_data: Reg,
         r_addr: Reg,
-        srcloc: Option<SourceLoc>,
     },
 
     /// A memory fence.  This must provide ordering to ensure that, at a minimum, neither loads
@@ -798,37 +782,31 @@ pub enum Inst {
     FpuLoad32 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// Floating-point store, single-precision (32 bit).
     FpuStore32 {
         rd: Reg,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// Floating-point load, double-precision (64 bit).
     FpuLoad64 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// Floating-point store, double-precision (64 bit).
     FpuStore64 {
         rd: Reg,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// Floating-point/vector load, 128 bit.
     FpuLoad128 {
         rd: Writable<Reg>,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
     /// Floating-point/vector store, 128 bit.
     FpuStore128 {
         rd: Reg,
         mem: AMode,
-        srcloc: Option<SourceLoc>,
     },
 
     LoadFpuConst64 {
@@ -1037,7 +1015,15 @@ pub enum Inst {
         rd: Writable<Reg>,
         rn: Reg,
         size: VectorSize,
-        srcloc: Option<SourceLoc>,
+    },
+
+    /// Vector conditional select, 128 bit.  A synthetic instruction, which generates a 4-insn
+    /// control-flow diamond.
+    VecCSel {
+        rd: Writable<Reg>,
+        rn: Reg,
+        rm: Reg,
+        cond: Cond,
     },
 
     /// Move to the NZCV flags (actually a `MSR NZCV, Xn` insn).
@@ -1095,7 +1081,7 @@ pub enum Inst {
     /// of this condition in a branch that skips the trap instruction.)
     TrapIf {
         kind: CondBrKind,
-        trap_info: (SourceLoc, TrapCode),
+        trap_code: TrapCode,
     },
 
     /// An indirect branch through a register, augmented with set of all
@@ -1111,7 +1097,7 @@ pub enum Inst {
     /// An instruction guaranteed to always be undefined and to trigger an illegal instruction at
     /// runtime.
     Udf {
-        trap_info: (SourceLoc, TrapCode),
+        trap_code: TrapCode,
     },
 
     /// Compute the address (using a PC-relative offset) of a memory location, using the `ADR`
@@ -1146,7 +1132,6 @@ pub enum Inst {
     LoadExtName {
         rd: Writable<Reg>,
         name: Box<ExternalName>,
-        srcloc: SourceLoc,
         offset: i64,
     },
 
@@ -1208,35 +1193,6 @@ fn inst_size_test() {
 }
 
 impl Inst {
-    /// Create a move instruction.
-    pub fn mov(to_reg: Writable<Reg>, from_reg: Reg) -> Inst {
-        assert!(to_reg.to_reg().get_class() == from_reg.get_class());
-        if from_reg.get_class() == RegClass::I64 {
-            Inst::Mov64 {
-                rd: to_reg,
-                rm: from_reg,
-            }
-        } else if from_reg.get_class() == RegClass::V128 {
-            Inst::FpuMove128 {
-                rd: to_reg,
-                rn: from_reg,
-            }
-        } else {
-            Inst::FpuMove64 {
-                rd: to_reg,
-                rn: from_reg,
-            }
-        }
-    }
-
-    /// Create a 32-bit move instruction.
-    pub fn mov32(to_reg: Writable<Reg>, from_reg: Reg) -> Inst {
-        Inst::Mov32 {
-            rd: to_reg,
-            rm: from_reg,
-        }
-    }
-
     /// Create an instruction that loads a constant, using one of serveral options (MOVZ, MOVN,
     /// logical immediate, or constant pool).
     pub fn load_constant(rd: Writable<Reg>, value: u64) -> SmallVec<[Inst; 4]> {
@@ -1457,47 +1413,22 @@ impl Inst {
     /// Generic constructor for a load (zero-extending where appropriate).
     pub fn gen_load(into_reg: Writable<Reg>, mem: AMode, ty: Type) -> Inst {
         match ty {
-            B1 | B8 | I8 => Inst::ULoad8 {
-                rd: into_reg,
-                mem,
-                srcloc: None,
-            },
-            B16 | I16 => Inst::ULoad16 {
-                rd: into_reg,
-                mem,
-                srcloc: None,
-            },
-            B32 | I32 | R32 => Inst::ULoad32 {
-                rd: into_reg,
-                mem,
-                srcloc: None,
-            },
-            B64 | I64 | R64 => Inst::ULoad64 {
-                rd: into_reg,
-                mem,
-                srcloc: None,
-            },
-            F32 => Inst::FpuLoad32 {
-                rd: into_reg,
-                mem,
-                srcloc: None,
-            },
-            F64 => Inst::FpuLoad64 {
-                rd: into_reg,
-                mem,
-                srcloc: None,
-            },
+            B1 | B8 | I8 => Inst::ULoad8 { rd: into_reg, mem },
+            B16 | I16 => Inst::ULoad16 { rd: into_reg, mem },
+            B32 | I32 | R32 => Inst::ULoad32 { rd: into_reg, mem },
+            B64 | I64 | R64 => Inst::ULoad64 { rd: into_reg, mem },
+            F32 => Inst::FpuLoad32 { rd: into_reg, mem },
+            F64 => Inst::FpuLoad64 { rd: into_reg, mem },
             _ => {
                 if ty.is_vector() {
                     let bits = ty_bits(ty);
                     let rd = into_reg;
-                    let srcloc = None;
 
                     if bits == 128 {
-                        Inst::FpuLoad128 { rd, mem, srcloc }
+                        Inst::FpuLoad128 { rd, mem }
                     } else {
                         assert_eq!(bits, 64);
-                        Inst::FpuLoad64 { rd, mem, srcloc }
+                        Inst::FpuLoad64 { rd, mem }
                     }
                 } else {
                     unimplemented!("gen_load({})", ty);
@@ -1509,47 +1440,22 @@ impl Inst {
     /// Generic constructor for a store.
     pub fn gen_store(mem: AMode, from_reg: Reg, ty: Type) -> Inst {
         match ty {
-            B1 | B8 | I8 => Inst::Store8 {
-                rd: from_reg,
-                mem,
-                srcloc: None,
-            },
-            B16 | I16 => Inst::Store16 {
-                rd: from_reg,
-                mem,
-                srcloc: None,
-            },
-            B32 | I32 | R32 => Inst::Store32 {
-                rd: from_reg,
-                mem,
-                srcloc: None,
-            },
-            B64 | I64 | R64 => Inst::Store64 {
-                rd: from_reg,
-                mem,
-                srcloc: None,
-            },
-            F32 => Inst::FpuStore32 {
-                rd: from_reg,
-                mem,
-                srcloc: None,
-            },
-            F64 => Inst::FpuStore64 {
-                rd: from_reg,
-                mem,
-                srcloc: None,
-            },
+            B1 | B8 | I8 => Inst::Store8 { rd: from_reg, mem },
+            B16 | I16 => Inst::Store16 { rd: from_reg, mem },
+            B32 | I32 | R32 => Inst::Store32 { rd: from_reg, mem },
+            B64 | I64 | R64 => Inst::Store64 { rd: from_reg, mem },
+            F32 => Inst::FpuStore32 { rd: from_reg, mem },
+            F64 => Inst::FpuStore64 { rd: from_reg, mem },
             _ => {
                 if ty.is_vector() {
                     let bits = ty_bits(ty);
                     let rd = from_reg;
-                    let srcloc = None;
 
                     if bits == 128 {
-                        Inst::FpuStore128 { rd, mem, srcloc }
+                        Inst::FpuStore128 { rd, mem }
                     } else {
                         assert_eq!(bits, 64);
-                        Inst::FpuStore64 { rd, mem, srcloc }
+                        Inst::FpuStore64 { rd, mem }
                     }
                 } else {
                     unimplemented!("gen_store({})", ty);
@@ -1806,6 +1712,11 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
         &Inst::VecLoadReplicate { rd, rn, .. } => {
             collector.add_def(rd);
             collector.add_use(rn);
+        }
+        &Inst::VecCSel { rd, rn, rm, .. } => {
+            collector.add_def(rd);
+            collector.add_use(rn);
+            collector.add_use(rm);
         }
         &Inst::FpuCmp32 { rn, rm } | &Inst::FpuCmp64 { rn, rm } => {
             collector.add_use(rn);
@@ -2418,6 +2329,16 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
             map_def(mapper, rd);
             map_use(mapper, rn);
         }
+        &mut Inst::VecCSel {
+            ref mut rd,
+            ref mut rn,
+            ref mut rm,
+            ..
+        } => {
+            map_def(mapper, rd);
+            map_use(mapper, rn);
+            map_use(mapper, rm);
+        }
         &mut Inst::FpuCmp32 {
             ref mut rn,
             ref mut rm,
@@ -2760,8 +2681,31 @@ impl MachInst for Inst {
     }
 
     fn gen_move(to_reg: Writable<Reg>, from_reg: Reg, ty: Type) -> Inst {
-        assert!(ty.bits() <= 128);
-        Inst::mov(to_reg, from_reg)
+        let bits = ty.bits();
+
+        assert!(bits <= 128);
+        assert!(to_reg.to_reg().get_class() == from_reg.get_class());
+
+        if from_reg.get_class() == RegClass::I64 {
+            Inst::Mov64 {
+                rd: to_reg,
+                rm: from_reg,
+            }
+        } else if from_reg.get_class() == RegClass::V128 {
+            if bits > 64 {
+                Inst::FpuMove128 {
+                    rd: to_reg,
+                    rn: from_reg,
+                }
+            } else {
+                Inst::FpuMove64 {
+                    rd: to_reg,
+                    rn: from_reg,
+                }
+            }
+        } else {
+            panic!("Unexpected register class: {:?}", from_reg.get_class());
+        }
     }
 
     fn gen_constant<F: FnMut(RegClass, Type) -> Writable<Reg>>(
@@ -2812,9 +2756,9 @@ impl MachInst for Inst {
             I8 | I16 | I32 | I64 | B1 | B8 | B16 | B32 | B64 | R32 | R64 => Ok(RegClass::I64),
             F32 | F64 => Ok(RegClass::V128),
             IFLAGS | FFLAGS => Ok(RegClass::I64),
-            B8X16 | I8X16 | B16X8 | I16X8 | B32X4 | I32X4 | B64X2 | I64X2 | F32X4 | F64X2 => {
-                Ok(RegClass::V128)
-            }
+            B8X8 | B8X16 | B16X4 | B16X8 | B32X2 | B32X4 | B64X2 => Ok(RegClass::V128),
+            F32X2 | I8X8 | I16X4 | I32X2 => Ok(RegClass::V128),
+            F32X4 | F64X2 | I8X16 | I16X8 | I32X4 | I64X2 => Ok(RegClass::V128),
             _ => Err(CodegenError::Unsupported(format!(
                 "Unexpected SSA-value type: {}",
                 ty
@@ -3024,37 +2968,30 @@ impl Inst {
             &Inst::ULoad8 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::SLoad8 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::ULoad16 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::SLoad16 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::ULoad32 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::SLoad32 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::ULoad64 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
                 ..
             } => {
                 let (mem_str, mem) = mem_finalize_for_show(mem, mb_rru, state);
@@ -3087,22 +3024,18 @@ impl Inst {
             &Inst::Store8 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::Store16 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::Store32 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
             }
             | &Inst::Store64 {
                 rd,
                 ref mem,
-                srcloc: _srcloc,
                 ..
             } => {
                 let (mem_str, mem) = mem_finalize_for_show(mem, mb_rru, state);
@@ -3211,9 +3144,9 @@ impl Inst {
                 format!("dmb ish")
             }
             &Inst::FpuMove64 { rd, rn } => {
-                let rd = rd.to_reg().show_rru(mb_rru);
-                let rn = rn.show_rru(mb_rru);
-                format!("mov {}.8b, {}.8b", rd, rn)
+                let rd = show_vreg_scalar(rd.to_reg(), mb_rru, ScalarSize::Size64);
+                let rn = show_vreg_scalar(rn, mb_rru, ScalarSize::Size64);
+                format!("fmov {}, {}", rd, rn)
             }
             &Inst::FpuMove128 { rd, rn } => {
                 let rd = rd.to_reg().show_rru(mb_rru);
@@ -3677,6 +3610,13 @@ impl Inst {
 
                 format!("ld1r {{ {} }}, [{}]", rd, rn)
             }
+            &Inst::VecCSel { rd, rn, rm, cond } => {
+                let rd = show_vreg_vector(rd.to_reg(), mb_rru, VectorSize::Size8x16);
+                let rn = show_vreg_vector(rn, mb_rru, VectorSize::Size8x16);
+                let rm = show_vreg_vector(rm, mb_rru, VectorSize::Size8x16);
+                let cond = cond.show_rru(mb_rru);
+                format!("vcsel {}, {}, {}, {} (if-then-else diamond)", rd, rn, rm, cond)
+            }
             &Inst::MovToNZCV { rn } => {
                 let rn = rn.show_rru(mb_rru);
                 format!("msr nzcv, {}", rn)
@@ -3841,7 +3781,6 @@ impl Inst {
                 rd,
                 ref name,
                 offset,
-                srcloc: _srcloc,
             } => {
                 let rd = rd.show_rru(mb_rru);
                 format!("ldr {}, 8 ; b 12 ; data {:?} + {}", rd, name, offset)
@@ -3856,9 +3795,10 @@ impl Inst {
                 for inst in mem_insts.into_iter() {
                     ret.push_str(&inst.show_rru(mb_rru));
                 }
-                let (reg, offset) = match mem {
-                    AMode::Unscaled(r, simm9) => (r, simm9.value()),
-                    AMode::UnsignedOffset(r, uimm12scaled) => (r, uimm12scaled.value() as i32),
+                let (reg, index_reg, offset) = match mem {
+                    AMode::RegExtended(r, idx, extendop) => (r, Some((idx, extendop)), 0),
+                    AMode::Unscaled(r, simm9) => (r, None, simm9.value()),
+                    AMode::UnsignedOffset(r, uimm12scaled) => (r, None, uimm12scaled.value() as i32),
                     _ => panic!("Unsupported case for LoadAddr: {:?}", mem),
                 };
                 let abs_offset = if offset < 0 {
@@ -3872,8 +3812,18 @@ impl Inst {
                     ALUOp::Add64
                 };
 
-                if offset == 0 {
-                    let mov = Inst::mov(rd, reg);
+                if let Some((idx, extendop)) = index_reg {
+                    let add = Inst::AluRRRExtend {
+                        alu_op: ALUOp::Add64,
+                        rd,
+                        rn: reg,
+                        rm: idx,
+                        extendop,
+                    };
+
+                    ret.push_str(&add.show_rru(mb_rru));
+                } else if offset == 0 {
+                    let mov = Inst::gen_move(rd, reg, I64);
                     ret.push_str(&mov.show_rru(mb_rru));
                 } else if let Some(imm12) = Imm12::maybe_from_u64(abs_offset) {
                     let add = Inst::AluRRImm12 {

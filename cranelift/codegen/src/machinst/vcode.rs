@@ -509,6 +509,7 @@ impl<I: VCodeInst> VCode<I> {
                     buffer.start_srcloc(srcloc);
                     cur_srcloc = Some(srcloc);
                 }
+                state.pre_sourceloc(cur_srcloc.unwrap_or(SourceLoc::default()));
 
                 if safepoint_idx < self.safepoint_insns.len()
                     && self.safepoint_insns[safepoint_idx] == iix
@@ -875,7 +876,7 @@ impl VCodeConstantData {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::mem::{size_of, size_of_val};
+    use std::mem::size_of;
 
     #[test]
     fn size_of_constant_structs() {
@@ -887,11 +888,8 @@ mod test {
             size_of::<PrimaryMap<VCodeConstant, VCodeConstantData>>(),
             24
         );
-        assert_eq!(size_of::<HashMap<Constant, VCodeConstant>>(), 48);
-        assert_eq!(size_of::<HashMap<*const [u8], VCodeConstant>>(), 48);
-        assert_eq!(size_of::<VCodeConstants>(), 120);
-        assert_eq!(size_of_val(&VCodeConstants::with_capacity(0)), 120);
-        // TODO This structure could use some significant memory-size optimization. The use of
-        // HashMap to deduplicate both pool and well-known constants is clearly an issue.
+        // TODO The VCodeConstants structure's memory size could be further optimized.
+        // With certain versions of Rust, each `HashMap` in `VCodeConstants` occupied at
+        // least 48 bytes, making an empty `VCodeConstants` cost 120 bytes.
     }
 }

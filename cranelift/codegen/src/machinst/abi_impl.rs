@@ -111,7 +111,7 @@
 use super::abi::*;
 use crate::binemit::StackMap;
 use crate::ir::types::*;
-use crate::ir::{ArgumentExtension, SourceLoc, StackSlot};
+use crate::ir::{ArgumentExtension, StackSlot};
 use crate::machinst::*;
 use crate::settings;
 use crate::CodegenResult;
@@ -350,7 +350,6 @@ pub trait ABIMachineSpec {
         dest: &CallDest,
         uses: Vec<Reg>,
         defs: Vec<Writable<Reg>>,
-        loc: SourceLoc,
         opcode: ir::Opcode,
         tmp: Writable<Reg>,
         callee_conv: isa::CallConv,
@@ -370,6 +369,16 @@ pub trait ABIMachineSpec {
     /// Get all caller-save registers, that is, registers that we expect
     /// not to be saved across a call to a callee with the given ABI.
     fn get_regs_clobbered_by_call(call_conv_of_callee: isa::CallConv) -> Vec<Writable<Reg>>;
+
+    /// Get the needed extension mode, given the mode attached to the argument
+    /// in the signature and the calling convention. The input (the attribute in
+    /// the signature) specifies what extension type should be done *if* the ABI
+    /// requires extension to the full register; this method's return value
+    /// indicates whether the extension actually *will* be done.
+    fn get_ext_mode(
+        call_conv: isa::CallConv,
+        specified: ir::ArgumentExtension,
+    ) -> ir::ArgumentExtension;
 }
 
 /// ABI information shared between body (callee) and caller.
@@ -771,6 +780,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
             &ABIArg::Reg(r, ty, ext, ..) => {
                 let from_bits = ty_bits(ty) as u8;
                 let dest_reg = Writable::from_reg(r.to_reg());
+                let ext = M::get_ext_mode(self.sig.call_conv, ext);
                 match (ext, from_bits) {
                     (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
                         if n < word_bits =>
@@ -794,6 +804,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
                 // backends (aarch64 and x64) enforce a 128MB limit.
                 let off = i32::try_from(off)
                     .expect("Argument stack offset greater than 2GB; should hit impl limit first");
+                let ext = M::get_ext_mode(self.sig.call_conv, ext);
                 // Trash the from_reg; it should be its last use.
                 match (ext, from_bits) {
                     (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
@@ -1102,8 +1113,6 @@ pub struct ABICallerImpl<M: ABIMachineSpec> {
     defs: Vec<Writable<Reg>>,
     /// Call destination.
     dest: CallDest,
-    /// Location of callsite.
-    loc: ir::SourceLoc,
     /// Actual call opcode; used to distinguish various types of calls.
     opcode: ir::Opcode,
     /// Caller's calling convention.
@@ -1127,7 +1136,6 @@ impl<M: ABIMachineSpec> ABICallerImpl<M> {
         sig: &ir::Signature,
         extname: &ir::ExternalName,
         dist: RelocDistance,
-        loc: ir::SourceLoc,
         caller_conv: isa::CallConv,
     ) -> CodegenResult<ABICallerImpl<M>> {
         let sig = ABISig::from_func_sig::<M>(sig)?;
@@ -1137,7 +1145,6 @@ impl<M: ABIMachineSpec> ABICallerImpl<M> {
             uses,
             defs,
             dest: CallDest::ExtName(extname.clone(), dist),
-            loc,
             opcode: ir::Opcode::Call,
             caller_conv,
             _mach: PhantomData,
@@ -1149,7 +1156,6 @@ impl<M: ABIMachineSpec> ABICallerImpl<M> {
     pub fn from_ptr(
         sig: &ir::Signature,
         ptr: Reg,
-        loc: ir::SourceLoc,
         opcode: ir::Opcode,
         caller_conv: isa::CallConv,
     ) -> CodegenResult<ABICallerImpl<M>> {
@@ -1160,7 +1166,6 @@ impl<M: ABIMachineSpec> ABICallerImpl<M> {
             uses,
             defs,
             dest: CallDest::Reg(ptr),
-            loc,
             opcode,
             caller_conv,
             _mach: PhantomData,
@@ -1218,27 +1223,28 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
         let word_rc = M::word_reg_class();
         let word_bits = M::word_bits() as usize;
         match &self.sig.args[idx] {
-            &ABIArg::Reg(reg, ty, ext, _)
-                if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits =>
-            {
-                assert_eq!(word_rc, reg.get_class());
-                let signed = match ext {
-                    ir::ArgumentExtension::Uext => false,
-                    ir::ArgumentExtension::Sext => true,
-                    _ => unreachable!(),
-                };
-                ctx.emit(M::gen_extend(
-                    Writable::from_reg(reg.to_reg()),
-                    from_reg,
-                    signed,
-                    ty_bits(ty) as u8,
-                    word_bits as u8,
-                ));
-            }
-            &ABIArg::Reg(reg, ty, _, _) => {
-                ctx.emit(M::gen_move(Writable::from_reg(reg.to_reg()), from_reg, ty));
+            &ABIArg::Reg(reg, ty, ext, _) => {
+                let ext = M::get_ext_mode(self.sig.call_conv, ext);
+                if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
+                    assert_eq!(word_rc, reg.get_class());
+                    let signed = match ext {
+                        ir::ArgumentExtension::Uext => false,
+                        ir::ArgumentExtension::Sext => true,
+                        _ => unreachable!(),
+                    };
+                    ctx.emit(M::gen_extend(
+                        Writable::from_reg(reg.to_reg()),
+                        from_reg,
+                        signed,
+                        ty_bits(ty) as u8,
+                        word_bits as u8,
+                    ));
+                } else {
+                    ctx.emit(M::gen_move(Writable::from_reg(reg.to_reg()), from_reg, ty));
+                }
             }
             &ABIArg::Stack(off, mut ty, ext, _) => {
+                let ext = M::get_ext_mode(self.sig.call_conv, ext);
                 if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
                     assert_eq!(word_rc, from_reg.get_class());
                     let signed = match ext {
@@ -1311,7 +1317,6 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
             &self.dest,
             uses,
             defs,
-            self.loc,
             self.opcode,
             tmp,
             self.sig.call_conv,
